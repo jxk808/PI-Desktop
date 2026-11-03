@@ -1,0 +1,1605 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="pi-plugin-chrome" content="v2" />
+    <title>订阅额度</title>
+    <style>
+      /*
+       * 视觉系统对齐 PI-Desktop 设计令牌（apps/desktop/src/styles/tokens.css）。
+       * 面板页是沙箱页，宿主不会注入 tokens.css，所以这里把同一套取值本地化，
+       * 深色为默认、浅色按 app.getAppearance().base 切到 data-base="light"。
+       */
+      :root {
+        color-scheme: dark;
+        --q-bg: #181818;
+        --q-surface: #212121;
+        --q-surface-2: #282828;
+        --q-inset: #0d0d0d;
+        --q-elevated: color-mix(in oklab, #212121 96%, transparent);
+        --q-fg: #ffffff;
+        --q-secondary: color-mix(in oklab, #ffffff 70%, transparent);
+        --q-muted: color-mix(in oklab, #ffffff 52%, transparent);
+        --q-faint: color-mix(in oklab, #ffffff 38%, transparent);
+        --q-border: color-mix(in oklab, #ffffff 8%, transparent);
+        --q-border-strong: color-mix(in oklab, #ffffff 14%, transparent);
+        --q-tile: color-mix(in oklab, #ffffff 3.5%, transparent);
+        --q-tile-hover: color-mix(in oklab, #ffffff 6%, transparent);
+        --q-tile-deep: color-mix(in oklab, #ffffff 8%, transparent);
+        /* 底槽 = 已用（灰），填充 = 剩余（按风险着色）。 */
+        --q-track: color-mix(in oklab, #ffffff 12%, transparent);
+        --q-accent: #ffffff;
+        --q-on-accent: #181818;
+        --q-good: #40c977;
+        --q-warn: #ff8549;
+        --q-bad: #ff6764;
+        --q-radius-xs: 8px;
+        --q-radius-sm: 10px;
+        --q-radius-md: 12px;
+        --q-radius-lg: 16px;
+        --q-radius-full: 9999px;
+        --q-font:
+          13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        --q-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+        --q-motion: 150ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      :root[data-base="light"] {
+        color-scheme: light;
+        --q-bg: #ffffff;
+        --q-surface: #f9f9f9;
+        --q-surface-2: #f3f3f3;
+        --q-inset: #ededed;
+        --q-elevated: color-mix(in oklab, #ffffff 70%, transparent);
+        --q-fg: #1a1c1f;
+        --q-secondary: color-mix(in oklab, #1a1c1f 74%, transparent);
+        --q-muted: #5d5d5d;
+        --q-faint: #afafaf;
+        --q-border: color-mix(in oklab, #1a1c1f 8%, transparent);
+        --q-border-strong: color-mix(in oklab, #1a1c1f 12%, transparent);
+        --q-tile: color-mix(in oklab, #1a1c1f 3.5%, transparent);
+        --q-tile-hover: color-mix(in oklab, #1a1c1f 6%, transparent);
+        --q-tile-deep: color-mix(in oklab, #1a1c1f 8%, transparent);
+        --q-track: color-mix(in oklab, #1a1c1f 12%, transparent);
+        --q-accent: #1a1c1f;
+        --q-on-accent: #ffffff;
+        --q-good: #00a240;
+        --q-warn: #e25507;
+        --q-bad: #e02e2a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+      }
+
+      body {
+        min-height: 100vh;
+        /* 面板是 46px 拖拽带 + 内容；停靠视图是 0px。用令牌，别写死。 */
+        padding: calc(var(--pi-plugin-titlebar-height, 0px) + 14px) 14px 22px;
+        background: var(--q-bg);
+        color: var(--q-fg);
+        font: var(--q-font);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* ── 头部 ─────────────────────────────────────────────────────────── */
+
+      .qp-head {
+        position: relative;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 4px 2px 10px;
+        background: var(--q-bg);
+        border-bottom: 1px solid transparent;
+        -webkit-app-region: no-drag;
+      }
+      .qp-head button,
+      .qp-head a,
+      .qp-head [role="button"] {
+        -webkit-app-region: no-drag;
+      }
+      .qp-head-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .qp-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 560;
+        letter-spacing: -0.02em;
+        line-height: 1.2;
+      }
+      .qp-sub {
+        margin: 2px 0 0;
+        font-size: 11.5px;
+        color: var(--q-muted);
+      }
+      .qp-head-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding-top: 2px;
+      }
+      .qp-updated {
+        font-size: 11px;
+        color: var(--q-faint);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      /* ── 控件 ─────────────────────────────────────────────────────────── */
+
+      .qp-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        height: 28px;
+        padding: 0 10px;
+        border: 1px solid var(--q-border);
+        border-radius: var(--q-radius-xs);
+        background: var(--q-tile);
+        color: var(--q-secondary);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        transition:
+          background var(--q-motion),
+          color var(--q-motion),
+          border-color var(--q-motion);
+      }
+      .qp-btn:hover {
+        background: var(--q-tile-hover);
+        color: var(--q-fg);
+      }
+      .qp-btn:active {
+        transform: translateY(1px);
+      }
+      .qp-btn:focus-visible {
+        outline: 2px solid var(--q-fg);
+        outline-offset: 2px;
+      }
+      .qp-btn[disabled] {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .qp-btn-icon {
+        width: 28px;
+        padding: 0;
+        font-size: 14px;
+      }
+      .qp-btn-primary {
+        background: var(--q-accent);
+        color: var(--q-on-accent);
+        border-color: transparent;
+      }
+      .qp-btn-primary:hover {
+        background: var(--q-accent);
+        color: var(--q-on-accent);
+        opacity: 0.86;
+      }
+      .qp-btn .qp-spin {
+        display: inline-block;
+        animation: qp-rotate 0.9s linear infinite;
+      }
+      @keyframes qp-rotate {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ── 提示条 ──────────────────────────────────────────────────────── */
+
+      .qp-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 10px;
+        padding: 8px 10px;
+        border-radius: var(--q-radius-sm);
+        background: var(--q-tile);
+        color: var(--q-secondary);
+        font-size: 12px;
+      }
+      .qp-banner .qp-banner-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .qp-dot {
+        flex: none;
+        width: 6px;
+        height: 6px;
+        border-radius: var(--q-radius-round, 50%);
+        background: var(--q-muted);
+      }
+      .qp-dot-good {
+        background: var(--q-good);
+      }
+      .qp-dot-warn {
+        background: var(--q-warn);
+      }
+      .qp-dot-bad {
+        background: var(--q-bad);
+      }
+
+      /* ── 账号卡片 ────────────────────────────────────────────────────── */
+
+      .qp-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .qp-card {
+        border: 1px solid var(--q-border);
+        border-radius: var(--q-radius-md);
+        background: var(--q-surface);
+        overflow: hidden;
+      }
+      .qp-card-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 11px 12px;
+        border-bottom: 1px solid var(--q-border);
+      }
+      .qp-brand {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: var(--q-radius-xs);
+        background: var(--q-tile-deep);
+        color: var(--q-fg);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        text-transform: uppercase;
+      }
+      .qp-brand[data-p="claude"] {
+        background: color-mix(in oklab, var(--q-warn) 22%, transparent);
+        color: var(--q-warn);
+      }
+      .qp-brand[data-p="codex"] {
+        background: color-mix(in oklab, var(--q-good) 22%, transparent);
+        color: var(--q-good);
+      }
+      .qp-card-title {
+        flex: 1;
+        min-width: 0;
+      }
+      .qp-name {
+        display: block;
+        font-size: 13px;
+        font-weight: 560;
+        letter-spacing: -0.01em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .qp-card-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 2px;
+      }
+      .qp-card-meta { flex-wrap: wrap; }
+      .qp-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: var(--q-radius-full);
+        background: var(--q-tile-deep);
+        color: var(--q-secondary);
+        font-size: 10.5px;
+        letter-spacing: 0.01em;
+        text-transform: lowercase;
+        white-space: nowrap;
+      }
+      .qp-chip-warn {
+        color: var(--q-warn);
+        background: color-mix(in oklab, var(--q-warn) 16%, transparent);
+      }
+      .qp-chip-bad {
+        color: var(--q-bad);
+        background: color-mix(in oklab, var(--q-bad) 16%, transparent);
+      }
+      .qp-chip-good {
+        color: var(--q-good);
+        background: color-mix(in oklab, var(--q-good) 16%, transparent);
+      }
+
+      .qp-chip-mail {
+        text-transform: none;
+
+      }
+      /* ── 额度窗口 ────────────────────────────────────────────────────── */
+
+      .qp-windows {
+        display: flex;
+        flex-direction: column;
+      }
+      .qp-window {
+        padding: 10px 12px 11px;
+        border-top: 1px solid var(--q-border);
+      }
+      .qp-window:first-child {
+        border-top: none;
+      }
+      .qp-window-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .qp-window-name {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        min-width: 0;
+      }
+      .qp-window-label {
+        font-size: 12.5px;
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .qp-window-span {
+        font-size: 10.5px;
+        color: var(--q-faint);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .qp-window-pct {
+        display: flex;
+        align-items: baseline;
+        gap: 4px;
+        flex: none;
+      }
+      .qp-window-pct b {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        font-variant-numeric: tabular-nums;
+      }
+      .qp-window-pct span {
+        font-size: 10.5px;
+        color: var(--q-muted);
+      }
+      .qp-window-pct[data-sev="good"] b {
+        color: var(--q-good);
+      }
+      .qp-window-pct[data-sev="warn"] b {
+        color: var(--q-warn);
+      }
+      .qp-window-pct[data-sev="bad"] b {
+        color: var(--q-bad);
+      }
+
+      .qp-bar {
+        position: relative;
+        height: 6px;
+        margin: 8px 0 7px;
+        border-radius: var(--q-radius-full);
+        background: var(--q-track);
+        overflow: hidden;
+      }
+      .qp-bar-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        border-radius: var(--q-radius-full);
+        background: var(--q-muted);
+        transition: width 300ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .qp-bar[data-sev="good"] .qp-bar-fill {
+        background: var(--q-good);
+      }
+      .qp-bar[data-sev="warn"] .qp-bar-fill {
+        background: var(--q-warn);
+      }
+      .qp-bar[data-sev="bad"] .qp-bar-fill {
+        background: var(--q-bad);
+      }
+
+      .qp-window-foot {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 11px;
+        color: var(--q-muted);
+      }
+      .qp-window-foot .qp-reset {
+        font-variant-numeric: tabular-nums;
+        color: var(--q-secondary);
+      }
+      .qp-window-foot .qp-reset[data-soon="true"] {
+        color: var(--q-warn);
+      }
+
+      /* ── 状态行 / 空态 ───────────────────────────────────────────────── */
+
+      .qp-note {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px 12px;
+        font-size: 11.5px;
+        color: var(--q-muted);
+        line-height: 1.5;
+      }
+      .qp-note-error {
+        color: var(--q-bad);
+      }
+      .qp-note code {
+        font-family: var(--q-mono);
+        font-size: 10.5px;
+        padding: 1px 4px;
+        border-radius: 4px;
+        background: var(--q-tile-deep);
+        color: var(--q-secondary);
+      }
+
+      .qp-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 34px 20px;
+        border: 1px dashed var(--q-border-strong);
+        border-radius: var(--q-radius-md);
+        text-align: center;
+      }
+      .qp-empty h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 560;
+      }
+      .qp-empty p {
+        margin: 0;
+        max-width: 40ch;
+        font-size: 12px;
+        color: var(--q-muted);
+        line-height: 1.55;
+      }
+
+      .qp-foot {
+        margin-top: 12px;
+        padding: 0 2px;
+        font-size: 10.5px;
+        color: var(--q-faint);
+        line-height: 1.5;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .qp-btn,
+        .qp-bar-fill {
+          transition: none;
+        }
+        .qp-btn .qp-spin {
+          animation: none;
+        }
+      }
+      /* Account management is isolated from the quota list's render cycle. */
+      .qa-panel {
+        margin: 0 0 14px;
+        padding: 14px;
+        border: 1px solid var(--q-border-strong);
+        border-radius: var(--q-radius-md);
+        background: var(--q-surface);
+        overflow-wrap: anywhere;
+      }
+      .qa-panel[hidden], .qa-panel [hidden] { display: none; }
+      .qa-heading, .qa-row, .qa-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .qa-heading { justify-content: space-between; }
+      .qa-heading h2 { margin: 0; font-size: 14px; }
+      .qa-panel p { margin: 8px 0; color: var(--q-secondary); font-size: 12px; }
+      .qa-row { padding: 10px 0; border-top: 1px solid var(--q-border); }
+      .qa-name { flex: 1; min-width: 130px; }
+      .qa-connected { color: var(--q-muted); font-size: 12px; }
+      .qa-login { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--q-border); }
+      .qa-panel label { display: block; margin: 10px 0 5px; font-size: 12px; }
+      .qa-input {
+        display: block; width: 100%; min-width: 0; margin-bottom: 8px; padding: 8px;
+        background: var(--q-inset); color: var(--q-fg); border: 1px solid var(--q-border-strong);
+        border-radius: var(--q-radius-xs); font: inherit;
+      }
+      .qa-input:focus-visible, .qa-heading h2:focus-visible { outline: 2px solid var(--q-fg); outline-offset: 2px; }
+      .qa-panel .qp-btn { height: auto; min-height: 32px; padding: 6px 10px; white-space: normal; }
+      .qa-panel .qa-error { color: var(--q-bad); }
+      .qa-code { font: 600 18px var(--q-mono); user-select: all; }
+      .qa-group { display: flex; flex-direction: column; margin-top: 14px; border-top: 1px solid var(--q-border-strong); }
+      .qa-group h3 { margin: 10px 0; font-size: 13px; }
+      .qa-editor, .qa-confirm { flex-basis: 100%; min-width: 0; }
+      .qa-editor label, .qa-add label { margin-top: 4px; }
+      .qa-add { margin-bottom: 10px; }
+      @media (max-width: 440px) {
+        .qp-head { flex-wrap: wrap; }
+        .qp-head-actions { flex-wrap: wrap; }
+        .qa-panel { padding: 10px; }
+      }
+      .qr-panel { padding: 12px 16px; border-top: 1px solid var(--q-border-strong); font-size: 12px; }
+      .qr-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+      .qr-panel .qp-btn { height: auto; min-height: 32px; padding: 6px 10px; white-space: normal; }
+      .qr-confirm { padding: 10px; margin-top: 8px; border: 1px solid var(--q-warn); border-radius: var(--q-radius-xs); }
+      .qr-confirm p { margin: 0 0 8px; overflow-wrap: anywhere; }
+      .qr-message { margin-top: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+      .qr-error { color: var(--q-bad); }
+    </style>
+  </head>
+  <body>
+    <header class="qp-head">
+      <div class="qp-head-main">
+        <h1 class="qp-title" id="title">订阅额度</h1>
+        <p class="qp-sub" id="subtitle">5 小时 · 每周 · 每月额度与剩余</p>
+      </div>
+      <div class="qp-head-actions">
+        <span class="qp-updated" id="updated"></span>
+        <button class="qp-btn" id="auth-toggle" type="button" aria-expanded="false" aria-controls="auth-panel">管理账号</button>
+        <button class="qp-btn qp-btn-icon" id="refresh" type="button" title="刷新">⟳</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="qa-panel" id="auth-panel" aria-labelledby="auth-title" hidden>
+        <div class="qa-heading">
+          <h2 id="auth-title" tabindex="-1">管理账号</h2>
+          <button class="qp-btn" id="auth-close" type="button">关闭</button>
+        </div>
+        <p id="auth-intro"></p>
+        <p id="auth-callback-help"></p>
+        <p id="auth-logout-help"></p>
+        <p id="auth-other-help"></p>
+        <p id="auth-disabled" role="status" hidden></p>
+        <p id="auth-add-help"></p>
+        <div id="auth-accounts"></div>
+        <div class="qa-actions"><button class="qp-btn" id="auth-check" type="button"></button></div>
+        <p id="auth-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p class="qa-error" id="auth-error" role="alert" hidden></p>
+        <div class="qa-login" id="auth-login" hidden>
+          <p id="auth-method"></p>
+          <p id="auth-url"></p>
+          <p id="auth-code-label" hidden></p>
+          <div class="qa-code" id="auth-code"></div>
+          <p id="auth-expires"></p>
+          <div class="qa-actions">
+            <button class="qp-btn" id="auth-open" type="button"></button>
+            <button class="qp-btn" id="auth-cancel" type="button"></button>
+          </div>
+          <form id="auth-form" autocomplete="off" hidden>
+            <label for="auth-input" id="auth-input-label"></label>
+            <input class="qa-input" id="auth-input" type="url" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="auth-callback-help" />
+            <button class="qp-btn" id="auth-submit" type="submit"></button>
+          </form>
+        </div>
+      </section>
+      <div id="banner"></div>
+      <div class="qp-list" id="list"></div>
+      <div id="foot" class="qp-foot"></div>
+    </main>
+
+    <script>
+      (function () {
+        "use strict";
+
+        // ── 文案 ────────────────────────────────────────────────────────────
+        const COPY = {
+          "zh-CN": {
+            title: "订阅额度",
+            subtitle: "5 小时 · 每周 · 每月额度与剩余",
+            refresh: "刷新",
+            refreshing: "刷新中",
+            updated: (t) => `更新于 ${t}`,
+            never: "尚未更新",
+            remaining: "剩余",
+            usedLabel: (p) => `已用 ${p}%`,
+            demoBanner: "当前显示内置演示数据，不会访问网络。",
+            realBanner: "只显示本机已登录的订阅账号。",
+            exitDemo: "退出演示",
+            enterDemo: "载入演示数据",
+            emptyTitle: "没有已登录的订阅账号",
+            emptyBody:
+              "可在「管理账号」中独立登录 ChatGPT、Claude 或 GitHub Copilot，无需安装 CLI。其他来源可在「设置 → 扩展 → 订阅额度」中配置。已有的本机账号也会自动显示。",
+            noWindows: "没有可用的额度窗口",
+            resetAt: (s) => `重置于 ${s}`,
+            resetNow: "即将重置",
+            resetSoon: "不足 1 分钟后重置",
+            resetMinutes: (m) => `${m} 分钟后重置`,
+            resetHours: (h, m) => `${h} 小时${m ? ` ${m} 分` : ""}后重置`,
+            resetDays: (d, h) => `${d} 天${h ? ` ${h} 小时` : ""}后重置`,
+            lowestRemaining: (p) => `剩余最少 ${p}%`,
+            priority: (n) => `优先级 ${n}`,
+            recommended: "推荐（上次额度）", exhausted: "已耗尽", availabilityUnknown: "额度未知",
+            recommendationHelp: "推荐仅基于上次读取的额度和插件账号优先级，供手动切换参考，不会自动路由或切换对话。所有窗口剩余均大于 0 且重置未过时才可推荐；任一窗口为 0 视为耗尽，缺失或过时则未知。这不是模型级精确判断。CLI / 手工来源不参与排序或推荐。",
+            barTitle: (r, u) => `剩余 ${r}% · 已用 ${u}%`,
+            labels: {
+              "window.session": "5 小时额度",
+              "window.day": "日额度",
+              "window.week": "周额度",
+              "window.week.sonnet": "周额度 · Sonnet",
+              "window.week.opus": "周额度 · Opus",
+              "window.week.oauth": "周额度 · 应用",
+              "window.month": "月额度",
+              "window.credit": "额度余额",
+              "window.other": "额度窗口",
+            },
+            span: (m) => `每 ${m}`,
+            standalone:
+              "未运行在 PI-Desktop 面板中，正在显示内置演示数据以便预览界面。",
+            loadFailed: "无法读取额度",
+            retry: "重试",
+          },
+          en: {
+            title: "Subscription Quotas",
+            subtitle: "5-hour · weekly · monthly quota and remaining",
+            refresh: "Refresh",
+            refreshing: "Refreshing",
+            updated: (t) => `Updated ${t}`,
+            never: "Not updated yet",
+            remaining: "remaining",
+            usedLabel: (p) => `${p}% used`,
+            demoBanner: "Showing built-in demo data. No network access.",
+            realBanner: "Showing only subscription accounts signed in on this machine.",
+            exitDemo: "Exit demo",
+            enterDemo: "Load demo data",
+            emptyTitle: "No signed-in subscription account",
+            emptyBody:
+              "Use Manage accounts to sign in independently to ChatGPT, Claude or GitHub Copilot—no CLI required. Configure other sources under Settings → Extensions → Subscription Quotas. Existing local accounts also appear automatically.",
+            noWindows: "No quota window available",
+            resetAt: (s) => `Resets ${s}`,
+            resetNow: "Resetting now",
+            resetSoon: "Resets in under a minute",
+            resetMinutes: (m) => `Resets in ${m} min`,
+            resetHours: (h, m) => `Resets in ${h}h${m ? ` ${m}m` : ""}`,
+            resetDays: (d, h) => `Resets in ${d}d${h ? ` ${h}h` : ""}`,
+            lowestRemaining: (p) => `lowest ${p}% remaining`,
+            priority: (n) => `Priority ${n}`,
+            recommended: "Recommended (last quota)", exhausted: "Exhausted", availabilityUnknown: "Quota unknown",
+            recommendationHelp: "Recommendations use the last quota reading and plugin account priority, for manual switching only. They never automatically route or switch conversations. All windows must have remaining quota above 0 and current resets; any zero means exhausted, missing or stale data means unknown. This is not a model-level guarantee. CLI / manual sources are not ranked or recommended.",
+            barTitle: (r, u) => `${r}% remaining · ${u}% used`,
+            labels: {
+              "window.session": "5-hour limit",
+              "window.day": "Daily limit",
+              "window.week": "Weekly limit",
+              "window.week.sonnet": "Weekly · Sonnet",
+              "window.week.opus": "Weekly · Opus",
+              "window.week.oauth": "Weekly · apps",
+              "window.month": "Monthly limit",
+              "window.credit": "Credit balance",
+              "window.other": "Quota window",
+            },
+            span: (m) => `every ${m}`,
+            standalone:
+              "Not running inside a PI-Desktop panel; showing built-in demo data to preview the interface.",
+            loadFailed: "Could not read quotas",
+            retry: "Retry",
+          },
+        };
+
+        // ── 状态 ────────────────────────────────────────────────────────────
+        let locale = "zh-CN";
+        let snapshot = null;
+        let loading = false;
+        let standalone = !(window.pluginBridge && window.pluginBridge.invoke);
+        let pollTimer = null;
+        let tickTimer = null;
+
+        const el = (id) => document.getElementById(id);
+        const t = () => COPY[locale] || COPY["zh-CN"];
+
+        function bridgeInvoke(channel, payload) {
+          if (!window.pluginBridge || !window.pluginBridge.invoke) {
+            return Promise.reject(new Error("pluginBridge unavailable"));
+          }
+          return window.pluginBridge.invoke(channel, payload);
+        }
+
+        // Explicit, account-scoped redemption. A query or page refresh never consumes a credit.
+        const resetStates = new Map();
+        const RESET_COPY = {
+          "zh-CN": {
+            query: "查询重置券", count: (n) => `可用重置券：${n} 张`, none: "没有可用的 Codex 重置券。",
+            use: "使用这张券", confirm: "确认消耗 1 张并重置", cancel: "取消", close: "关闭",
+            expires: (s) => `有效期至 ${s}`, never: "未提供到期时间", busy: "正在处理，请勿重复操作…",
+            warning: (name) => `将为「${name}」消耗 1 张官方 Codex 重置券。此操作不能撤销，不会重置 API 账单或所有 ChatGPT 限额。`,
+            accountIdentity: (id) => `OpenAI 账号 ID：${id}`, creditIdentity: (id) => `重置券 ID：${id}`,
+            retry: "恢复上次兑换", pending: "上次兑换结果待确认。恢复时只使用原来的券和兑换编号，不会自动改用新券。",
+            pendingOther: "同一 OpenAI 账号的另一个插件授权正在兑换，请回到原账号卡片处理。",
+            login: "手动重置需先在「管理账号」中独立授权 OpenAI；CLI / 手工来源仅查询额度。",
+            results: { reset: "OpenAI 已重置额度。", already_redeemed: "该券已兑换，请以重新查询的额度为准。", nothing_to_reset: "OpenAI 返回：当前没有可重置的窗口。", no_credit: "OpenAI 返回：这张重置券已不可用。" },
+            errors: {
+              RESET_AUTH_REQUIRED: "请重新授权该 OpenAI 账号，或确认账号有权使用此功能。",
+              RESET_ACCOUNT_INVALID: "请选择插件内已授权的 OpenAI 账号。",
+              RESET_ACCOUNT_CHANGED: "账号身份已变化，未向新账号兑换。请恢复原账号授权后处理。",
+              RESET_HOST_UNSUPPORTED: "客户端不支持禁止重定向的请求，请升级 PI-DES 至 0.18.x 或更新版本。",
+              RESET_RATE_LIMITED: "OpenAI 查询频率受限，请稍后手动查询。",
+              RESET_CREDIT_UNAVAILABLE: "券已过期、用完或不可兑换，请重新查询。",
+              RESET_CONFIRM_EXPIRED: "确认已过期，请重新查询重置券。",
+              RESET_STORE_UNAVAILABLE: "无法安全读写兑换记录，已停止操作。请检查插件数据目录权限。",
+              RESET_UNCERTAIN: "兑换结果未知，未自动重试。请查询后恢复同一次兑换；不要删除兑换记录。",
+              RESET_PENDING_OTHER_LOGIN: "同一 OpenAI 账号已有待处理兑换，请回到原授权卡片。",
+              RESET_PENDING_DIFFERENT_CREDIT: "另一面板已选定不同的券，未替换你的选择。请查询后恢复或取消原兑换。",
+              RESET_RESPONSE_INVALID: "OpenAI 返回了不支持的数据格式，未自动兑换。",
+              RESET_NETWORK: "请求失败，请检查网络与插件权限后重新查询。",
+              RESET_OFFLINE: "演示和离线预览不允许兑换。",
+            },
+            failed: "操作失败，未自动重试。请重新查询或检查官方页面。", refreshFailed: "额度重新查询失败，请稍后点刷新；不要重复兑换。",
+          },
+          en: {
+            query: "Query reset credits", count: (n) => `${n} available reset credits`, none: "No eligible Codex reset credit.",
+            use: "Use this credit", confirm: "Consume 1 credit and reset", cancel: "Cancel", close: "Close",
+            expires: (s) => `Expires ${s}`, never: "No expiry provided", busy: "Processing; do not repeat…",
+            warning: (name) => `Consume one official Codex reset credit for “${name}”? This cannot be undone. It does not reset API billing or all ChatGPT limits.`,
+            accountIdentity: (id) => `OpenAI account ID: ${id}`, creditIdentity: (id) => `Reset credit ID: ${id}`,
+            retry: "Resume last redemption", pending: "The last result is unknown. Resuming uses the same credit and redemption ID, never a new credit automatically.",
+            pendingOther: "Another plugin login for this OpenAI account has a pending redemption. Return to its original card.",
+            login: "Sign in to OpenAI in Manage accounts to redeem. CLI / manual sources remain read-only.",
+            results: { reset: "OpenAI reset the usage limits.", already_redeemed: "The credit was already redeemed; check the refreshed quota.", nothing_to_reset: "OpenAI reports no window to reset.", no_credit: "OpenAI reports this credit is no longer available." },
+            errors: {
+              RESET_AUTH_REQUIRED: "Authorize this OpenAI account again or verify its eligibility.",
+              RESET_ACCOUNT_INVALID: "Select a plugin-authorized OpenAI account.",
+              RESET_ACCOUNT_CHANGED: "Account identity changed. Nothing was redeemed on the new account; restore the original login.",
+              RESET_HOST_UNSUPPORTED: "Update PI-DES to 0.18.x or newer for redirect-safe requests.",
+              RESET_RATE_LIMITED: "OpenAI rate-limited the query. Query again later.",
+              RESET_CREDIT_UNAVAILABLE: "This credit expired, was redeemed or is ineligible. Query again.",
+              RESET_CONFIRM_EXPIRED: "Confirmation expired. Query the credits again.",
+              RESET_STORE_UNAVAILABLE: "Cannot safely read or write the redemption record. Check plugin data permissions.",
+              RESET_UNCERTAIN: "Unknown redemption result; no automatic retry. Query and resume the same operation. Do not delete the record.",
+              RESET_PENDING_OTHER_LOGIN: "Another login for this OpenAI account has a pending operation. Use the original card.",
+              RESET_PENDING_DIFFERENT_CREDIT: "Another panel selected a different credit. Your selection was not substituted. Query and resume or cancel the original operation.",
+              RESET_RESPONSE_INVALID: "Unsupported OpenAI response format. No automatic redemption.",
+              RESET_NETWORK: "Request failed. Check the network and plugin permissions, then query again.",
+              RESET_OFFLINE: "Demo and offline preview cannot redeem credits.",
+            },
+            failed: "Operation failed; no automatic retry. Query again or check the official page.", refreshFailed: "Quota refresh failed. Refresh later; do not redeem again.",
+          },
+        };
+        const resetCopy = () => RESET_COPY[locale] || RESET_COPY["zh-CN"];
+        const resetExpiry = (iso) => new Date(iso).toLocaleString(locale === "en" ? "en-US" : "zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+        function resetState(id) {
+          if (!resetStates.has(id)) resetStates.set(id, { busy: false, data: null, op: null, confirm: false, message: "", error: "" });
+          return resetStates.get(id);
+        }
+        function resetButton(accountId, action, label, disabled, creditId) {
+          return `<button type="button" class="qp-btn" data-reset-account="${escapeHtml(accountId)}" data-reset-action="${action}"${creditId ? ` data-reset-credit="${escapeHtml(creditId)}"` : ""}${disabled ? " disabled" : ""}>${escapeHtml(label)}</button>`;
+        }
+        function renderReset(account) {
+          if (account.provider !== "openai-codex" || account.demo || standalone || snapshot?.demo) return "";
+          const c = resetCopy(), id = account.resetAccountId;
+          if (!id || account.source !== "plugin") return `<div class="qr-panel">${escapeHtml(c.login)}</div>`;
+          const s = resetState(id), pending = s.data?.pending;
+          let html = `<div class="qr-row">${resetButton(id, "list", c.query, s.busy)}${s.data ? `<span>${escapeHtml(c.count(s.data.availableCount))}</span>` : ""}</div>`;
+          if (pending) {
+            html += `<p>${escapeHtml(pending.accountId === id ? c.pending : c.pendingOther)}</p>`;
+            if (pending.accountId === id) html += resetButton(id, "resume", c.retry, s.busy);
+          } else if (s.data && !s.confirm) {
+            html += s.data.credits.length ? s.data.credits.map((credit) => `<div class="qr-row"><span>${escapeHtml(credit.expiresAt ? c.expires(resetExpiry(credit.expiresAt)) : c.never)}</span>${resetButton(id, "prepare", c.use, s.busy, credit.id)}</div>`).join("") : `<p>${escapeHtml(c.none)}</p>`;
+          }
+          if (s.confirm && s.op) html += `<div class="qr-confirm" role="group" aria-label="${escapeHtml(c.confirm)}"><p>${escapeHtml(c.warning(s.op.label || "OpenAI"))}</p><p>${escapeHtml(c.accountIdentity(s.op.upstreamAccountId))}</p><p>${escapeHtml(c.creditIdentity(s.op.creditId))}</p><p>${escapeHtml(s.op.expiresAt ? c.expires(resetExpiry(s.op.expiresAt)) : c.never)}</p>${s.op.uncertain ? `<p>${escapeHtml(c.pending)}</p>` : ""}<div class="qr-row">${resetButton(id, "consume", c.confirm, s.busy)}${resetButton(id, "cancel", s.op.uncertain ? c.close : c.cancel, s.busy)}</div></div>`;
+          if (s.busy) html += `<div class="qr-message" role="status">${escapeHtml(c.busy)}</div>`;
+          if (s.message) html += `<div class="qr-message" role="status">${escapeHtml(s.message)}</div>`;
+          if (s.error) html += `<div class="qr-message qr-error" role="alert">${escapeHtml(s.error)}</div>`;
+          return `<section class="qr-panel">${html}</section>`;
+        }
+        async function resetAction(id, action, creditId) {
+          if (standalone || snapshot?.demo) return;
+          const account = snapshot?.accounts?.find((a) => a.resetAccountId === id && a.source === "plugin" && a.provider === "openai-codex");
+          if (!account) return;
+          const s = resetState(id), c = resetCopy();
+          if (s.busy) return;
+          if (action === "resume") { s.op = s.data?.pending; s.confirm = !!s.op; render(); return; }
+          if (action === "cancel" && s.op?.uncertain) { s.confirm = false; render(); return; }
+          if (!["list", "prepare", "consume", "cancel"].includes(action)) return;
+          if (action === "consume" && (!s.confirm || !s.op)) return;
+          s.busy = true; s.error = ""; s.message = ""; render();
+          let refresh = false;
+          try {
+            const payload = action === "consume" || action === "cancel" ? { operationId: s.op?.operationId, ...(action === "consume" ? { confirmed: true } : {}) } : { accountId: id, ...(action === "prepare" ? { creditId } : {}) };
+            const result = await bridgeInvoke(`quota.openaiReset.${action}`, payload);
+            if (!result?.ok) throw Object.assign(new Error("reset failed"), { code: result?.code });
+            if (action === "list") { s.data = result; s.confirm = false; s.op = null; }
+            else if (action === "prepare") { s.op = result; s.confirm = true; }
+            else if (action === "cancel") { s.op = null; s.confirm = false; s.data = null; }
+            else {
+              s.message = c.results[result.code] || c.failed;
+              s.op = null; s.confirm = false; s.data = null; refresh = true;
+            }
+          } catch (error) {
+            s.error = c.errors[error?.code] || c.failed;
+            // A bridge timeout may occur after upstream consumption. Only resume this saved operation.
+            if (action === "consume" && s.op) {
+              s.op = { ...s.op, uncertain: true }; s.confirm = false;
+              s.data = { availableCount: 0, credits: [], pending: s.op };
+              if (!error?.code) s.error = c.errors.RESET_UNCERTAIN;
+            }
+          } finally { s.busy = false; render(); }
+          if (refresh) {
+            try {
+              const fresh = await bridgeInvoke("quota.refresh", {});
+              if (!fresh?.ok) throw Error();
+              snapshot = fresh; render();
+            } catch { s.error = c.refreshFailed; render(); }
+          }
+        }
+
+        // ── Plugin-owned OAuth; never reuse host login or persist form input. ──
+        const AUTH_COPY = {
+          "zh-CN": {
+            title: "管理账号", close: "关闭", check: "刷新授权状态",
+            intro: "这是插件独立登录，无需安装 CLI，也不复用宿主登录。需要再次授权一次，不会修改宿主账号。",
+            callback: "浏览器回调由 127.0.0.1 本机接收。若自动回调失败，可粘贴最终跳转的完整 localhost URL（必须包含 state）。",
+            logoutHelp: "删除仅清除本插件中此账号的授权，不退出或修改宿主 / CLI，也不删除手动令牌；其他来源的账号可能继续显示。",
+            other: "OpenRouter：仍需在插件设置中手动填写 API Key。Kimi / Meta / Radius / xAI：仍需配置自定义来源，此处不提供 OAuth 登录。",
+            blocked: "离线预览和演示模式不支持真实授权。请在 PI-Desktop 中退出演示后使用。",
+            loading: "正在读取插件授权状态…", unknown: "授权状态未知", ready: "可选择账号独立授权；同一时间只能进行一个登录。",
+            connected: "插件已授权", disconnected: "插件未授权", add: "添加账号", again: "重新授权", logout: "删除本插件授权",
+            addHelp: "每个服务最多 10 个插件账号。新增授权时必须在浏览器切换到目标账号：当前浏览器会话可能仍是旧账号。重复授权不会带来新额度，请勿将重复授权当成新额度。仅插件 OAuth 账号可排序，不修改宿主。",
+            up: "上移", down: "下移",
+            count: (n) => `${n} / 10 个账号`, confirm: "确认删除", keep: "取消删除",
+            deleteConfirm: (name) => `删除「${name}」的本插件授权？仅清除此插件凭据，不影响宿主、CLI 或手动令牌。`,
+            open: "重新打开登录浏览器", cancel: "取消登录", submit: "提交回调 URL",
+            input: "最终跳转的完整回调 URL", invalid: "请粘贴包含 state 的完整 http://localhost 回调 URL。",
+            browser: "已尝试打开浏览器，请完成授权。无法自动返回时，可在下方粘贴最终跳转 URL。",
+            device: "请在登录页面输入下方设备码完成授权，无需粘贴回调 URL。",
+            code: "设备码（可选中复制）", expires: "登录有效期至", failed: "授权操作失败，请重试。",
+            states: { starting: "正在启动登录…", waiting: "等待授权…", exchanging: "正在完成授权…", success: "插件授权成功，正在刷新额度。", error: "登录失败，可重新登录。", cancelled: "登录已取消。" },
+          },
+          en: {
+            title: "Manage accounts", close: "Close", check: "Refresh authorization status",
+            intro: "This is an independent plugin sign-in: no CLI required, and no host login is reused. Authorize once again; your host account is not changed.",
+            callback: "Browser callbacks are received locally at 127.0.0.1. If the automatic callback fails, paste the complete final localhost redirect URL (including state).",
+            logoutHelp: "Deletion removes only this account's plugin authorization, not host / CLI sessions or manual tokens. Accounts from other sources may still appear.",
+            other: "OpenRouter still requires a manual API Key in plugin settings. Kimi / Meta / Radius / xAI still require custom sources; OAuth is not offered here.",
+            blocked: "Real authorization is disabled in offline preview and demo mode. Open in PI-Desktop and exit demo to continue.",
+            loading: "Reading plugin authorization status…", unknown: "Authorization status unknown", ready: "Choose an account to authorize independently. Only one sign-in can run at a time.",
+            connected: "Plugin authorized", disconnected: "Plugin not authorized", add: "Add account", again: "Authorize again", logout: "Delete plugin authorization",
+            addHelp: "Up to 10 plugin accounts per vendor. When adding, you must switch to the target account in the browser: the current session may still use the old account. Repeated authorization does not create new quota; do not count it as extra quota. Only plugin OAuth accounts can be ranked; the host is unchanged.",
+            up: "Move up", down: "Move down",
+            count: (n) => `${n} / 10 accounts`, confirm: "Confirm deletion", keep: "Cancel deletion",
+            deleteConfirm: (name) => `Delete plugin authorization for “${name}”? Only this plugin's credentials are removed; host, CLI and manual tokens are unaffected.`,
+            open: "Reopen sign-in browser", cancel: "Cancel sign-in", submit: "Submit callback URL",
+            input: "Complete final callback URL", invalid: "Paste a complete http://localhost callback URL including state.",
+            browser: "The browser has been opened if possible. Complete authorization, or paste the final redirect URL below if the callback fails.",
+            device: "Enter the device code below on the sign-in page. No callback URL is needed.",
+            code: "Device code (select to copy)", expires: "Sign-in expires at", failed: "Authorization failed. Please retry.",
+            states: { starting: "Starting sign-in…", waiting: "Waiting for authorization…", exchanging: "Completing authorization…", success: "Plugin authorized; refreshing quotas.", error: "Sign-in failed. You can try again.", cancelled: "Sign-in cancelled." },
+          },
+        };
+        const authCopy = () => AUTH_COPY[locale] || AUTH_COPY["zh-CN"];
+        let authVisible = false;
+        let authData = null;
+        let authReady = false;
+        let authBusy = false;
+        let authError = "";
+        let authTimer = null;
+        let authResync = false;
+        let authDisposed = false;
+        let authInputLogin = null;
+        let authRefreshNeeded = false;
+        const authRefreshed = new Set();
+        const authBlocked = () => standalone || !snapshot || !!snapshot.demo;
+        const authPending = () => !!(authData && authData.login && ["starting", "waiting", "exchanging"].includes(authData.login.status));
+
+        function authText(id, value) {
+          const node = el(id);
+          const text = String(value || "");
+          if (node.textContent !== text) node.textContent = text;
+        }
+
+        function stopAuthPoll() {
+          if (authTimer) clearTimeout(authTimer);
+          authTimer = null;
+        }
+
+        function scheduleAuthPoll() {
+          stopAuthPoll();
+          if (!authDisposed && authVisible && !document.hidden && !authBlocked() && authPending()) {
+            authTimer = setTimeout(() => { authTimer = null; void authRequest("status"); }, 2000);
+          }
+        }
+
+        function flushAuthRefresh() {
+          if (!authRefreshNeeded || loading || authBlocked() || authDisposed) return;
+          authRefreshNeeded = false;
+          void load({ force: true });
+        }
+
+        const authRows = new Map();
+        const authGroups = new Map();
+        const AUTH_VENDORS = [["openai-codex", "OpenAI (ChatGPT Plus/Pro)"], ["anthropic", "Anthropic (Claude Pro/Max)"], ["github-copilot", "GitHub Copilot"]];
+        function makeButton(action, text) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "qp-btn";
+          button.dataset.auth = action;
+          button.textContent = text;
+          return button;
+        }
+        function ensureAuthGroup(vendor, name) {
+          if (authGroups.has(vendor)) return authGroups.get(vendor);
+          const group = document.createElement("section");
+          group.className = "qa-group";
+          group.dataset.vendor = vendor;
+          const heading = document.createElement("h3");
+          const add = document.createElement("div");
+          add.className = "qa-add qa-row";
+          const button = makeButton("start", authCopy().add);
+          button.dataset.vendor = vendor;
+          add.append(button);
+          group.append(heading, add);
+          el("auth-accounts").append(group);
+          const view = { group, heading, addButton: button, rows: new Map() };
+          authGroups.set(vendor, view);
+          return view;
+        }
+        function renderAuthAccounts(blocked, pending) {
+          const c = authCopy();
+          const accounts = Array.isArray(authData?.accounts) ? authData.accounts : [];
+          for (const [vendor, name] of AUTH_VENDORS) {
+            const group = ensureAuthGroup(vendor, name);
+            const list = accounts.filter((account) => account.vendor === vendor);
+            group.heading.textContent = `${name} · ${c.count(list.length)}`;
+            group.addButton.textContent = c.add;
+            group.addButton.disabled = blocked || authBusy || !authData || pending || list.length >= 10;
+            const ids = new Set(list.map((account) => account.id));
+            for (const [id, view] of group.rows) if (!ids.has(id)) { view.row.remove(); group.rows.delete(id); authRows.delete(id); }
+            for (const account of list) {
+              let view = group.rows.get(account.id);
+              if (!view) {
+                const row = document.createElement("div"); row.className = "qa-row"; row.dataset.accountId = account.id;
+                const nameNode = document.createElement("strong"); nameNode.className = "qa-name";
+                const status = document.createElement("span"); status.className = "qa-connected";
+                const actions = document.createElement("div"); actions.className = "qa-actions";
+                const start = makeButton("start", c.again), up = makeButton("up", c.up), down = makeButton("down", c.down), del = makeButton("delete", c.logout);
+                const confirm = document.createElement("span"); confirm.className = "qa-confirm"; confirm.hidden = true;
+                const yes = makeButton("logout", c.confirm), no = makeButton("keep", c.keep);
+                confirm.append(document.createTextNode(c.deleteConfirm(account.label)), yes, no);
+                actions.append(start, up, down, del, confirm); row.append(nameNode, status, actions); group.group.append(row);
+                view = { row, name: nameNode, status, buttons: { start, up, down, delete: del, logout: yes, keep: no }, confirm };
+                group.rows.set(account.id, view); authRows.set(account.id, view);
+              }
+              const card = snapshot?.accounts?.find((r) => r.id === `plugin:${account.id}`);
+              const display = card ? card.label : account.label;
+              view.name.textContent = `${t().priority(account.priority)} · ${display}`;
+              view.status.textContent = account.connected ? c.connected : c.disconnected;
+              view.buttons.start.textContent = c.again; view.buttons.up.textContent = c.up; view.buttons.down.textContent = c.down; view.buttons.delete.textContent = c.logout;
+              view.buttons.up.disabled = blocked || authBusy || pending || account.priority <= 1; view.buttons.down.disabled = blocked || authBusy || pending || account.priority >= list.length;
+              view.buttons.start.disabled = blocked || authBusy || pending; view.buttons.delete.disabled = blocked || authBusy || pending;
+              view.buttons.logout.textContent = c.confirm; view.buttons.keep.textContent = c.keep;
+              view.confirm.firstChild.textContent = c.deleteConfirm(display);
+              view.buttons.logout.disabled = blocked || authBusy || pending;
+              view.row.style.order = String(account.priority);
+            }
+          }
+        }
+
+        function renderAuth() {
+          const c = authCopy();
+          const blocked = authBlocked();
+          if (blocked) {
+            stopAuthPoll();
+            authData = null;
+            authReady = false;
+          }
+          const login = authData && authData.login;
+          const pending = authPending();
+          const inputId = pending ? login.id : null;
+          if (authInputLogin !== inputId || blocked) {
+            el("auth-input").value = "";
+            authInputLogin = inputId;
+          }
+          const labels = {
+            "auth-toggle": c.title, "auth-title": c.title, "auth-close": c.close,
+            "auth-intro": c.intro, "auth-callback-help": c.callback, "auth-logout-help": c.logoutHelp,
+            "auth-add-help": c.addHelp,
+            "auth-other-help": c.other, "auth-disabled": snapshot ? c.blocked : c.loading,
+            "auth-check": c.check, "auth-open": c.open, "auth-cancel": c.cancel,
+            "auth-submit": c.submit, "auth-input-label": c.input, "auth-code-label": c.code,
+          };
+          for (const [id, value] of Object.entries(labels)) authText(id, value);
+          el("auth-disabled").hidden = !blocked;
+          el("auth-check").disabled = blocked || authBusy;
+          renderAuthAccounts(blocked, pending);
+          authText("auth-status", blocked ? "" : login
+            ? `${login.vendor}: ${c.states[login.status] || c.unknown}${login.message ? ` ${login.message}` : ""}`
+            : !authReady ? c.loading : authData ? c.ready : c.unknown);
+          authText("auth-error", blocked ? "" : authError);
+          el("auth-error").hidden = blocked || !authError;
+          const hideLogin = blocked || !pending;
+          if (hideLogin && authVisible && el("auth-login").contains(document.activeElement)) el("auth-title").focus();
+          el("auth-login").hidden = hideLogin;
+          el("auth-form").hidden = hideLogin || login.method !== "browser";
+          authText("auth-method", !hideLogin ? `${login.method === "device" ? c.device : c.browser} ${c.addHelp}` : "");
+          authText("auth-url", !hideLogin ? login.url : "");
+          authText("auth-code", !hideLogin && login.method === "device" ? login.userCode : "");
+          el("auth-code-label").hidden = hideLogin || login.method !== "device" || !login.userCode;
+          authText("auth-expires", !hideLogin && Number.isFinite(login.expiresAt)
+            ? `${c.expires}: ${new Date(login.expiresAt).toLocaleString(locale)}` : "");
+          el("auth-open").disabled = hideLogin || authBusy || !login.url;
+          el("auth-cancel").disabled = hideLogin || authBusy;
+          el("auth-submit").disabled = hideLogin || authBusy || login.status === "exchanging";
+        }
+
+        async function authRequest(action, payload = {}) {
+          if (authDisposed || authBlocked() || !authVisible || document.hidden) return;
+          if (authBusy) {
+            if (action === "status") authResync = true;
+            return;
+          }
+          authBusy = true;
+          stopAuthPoll();
+          if (action !== "status") authError = "";
+          try {
+            renderAuth();
+            const result = await bridgeInvoke(`quota.auth.${action}`, payload);
+            if (authDisposed || authBlocked()) return;
+            authReady = true;
+            if (!result || !result.ok) {
+              authError = result && result.message ? String(result.message) : authCopy().failed;
+              return;
+            }
+            authError = "";
+            authData = { accounts: Array.isArray(result.accounts) ? result.accounts : [], login: result.login || null };
+            if (action === "start" && !payload.accountId && result.login?.status === "waiting") {
+              el("auth-login").scrollIntoView?.({ block: "nearest" });
+            }
+            if (action === "submit") el("auth-input").value = "";
+            const login = authData.login;
+            if (login && login.status === "success" && !authRefreshed.has(login.id)) {
+              authRefreshed.add(login.id);
+              authRefreshNeeded = true;
+            }
+            if (["move", "logout"].includes(action)) authRefreshNeeded = true;
+          } catch {
+            // Do not log bridge failures: callback URLs may contain authorization codes.
+            authReady = true;
+            authError = authCopy().failed;
+          } finally {
+            authBusy = false;
+            if (!authDisposed) {
+              try { renderAuth(); } catch { authText("auth-error", authCopy().failed); el("auth-error").hidden = false; }
+              flushAuthRefresh();
+              if (authResync) {
+                authResync = false;
+                void authRequest("status");
+              } else scheduleAuthPoll();
+            }
+          }
+        }
+
+        function showAuth(visible) {
+          authVisible = visible;
+          el("auth-panel").hidden = !visible;
+          el("auth-toggle").setAttribute("aria-expanded", String(visible));
+          stopAuthPoll();
+          renderAuth();
+          if (visible) {
+            el("auth-title").focus();
+            void authRequest("status");
+          } else {
+            el("auth-input").value = "";
+            el("auth-toggle").focus();
+          }
+        }
+
+        el("auth-toggle").addEventListener("click", () => showAuth(!authVisible));
+        el("auth-close").addEventListener("click", () => showAuth(false));
+        el("auth-panel").addEventListener("keydown", (event) => {
+          if (event.key === "Escape") { event.preventDefault(); showAuth(false); }
+        });
+        el("auth-check").addEventListener("click", () => { void authRequest("status"); });
+        el("auth-accounts").addEventListener("click", (event) => {
+          const button = event.target.closest("[data-auth]");
+          if (!button || button.disabled || authBlocked() || authBusy || authPending() || !authData) return;
+          const row = button.closest("[data-account-id]");
+          const action = button.dataset.auth;
+          if (!row && action === "start") {
+            const group = authGroups.get(button.dataset.vendor);
+            if (!group) return;
+            void authRequest("start", { vendor: button.dataset.vendor });
+            return;
+          }
+          if (!row) return;
+          const account = authData.accounts.find((item) => item.id === row.dataset.accountId);
+          const view = account && authRows.get(account.id);
+          if (!account || !view) return;
+          if (action === "delete") {
+            view.confirm.hidden = false;
+            view.buttons.logout.focus();
+          } else if (action === "keep") {
+            view.confirm.hidden = true;
+            view.buttons.delete.focus();
+          } else if (action === "logout") {
+            void authRequest("logout", { accountId: account.id });
+          } else if (action === "start") {
+            void authRequest("start", { vendor: account.vendor, accountId: account.id });
+          } else if (action === "up" || action === "down") {
+            void authRequest("move", { accountId: account.id, direction: action });
+          }
+        });
+        for (const action of ["open", "cancel"]) {
+          el(`auth-${action}`).addEventListener("click", () => {
+            if (authPending()) void authRequest(action, { id: authData.login.id });
+          });
+        }
+        el("auth-form").addEventListener("submit", (event) => {
+          event.preventDefault();
+          if (!authPending() || authData.login.method !== "browser" || authBusy || authBlocked()) return;
+          const input = el("auth-input").value.trim();
+          try {
+            const url = new URL(input);
+            if (url.protocol !== "http:" || url.hostname !== "localhost" || url.username || url.password || !url.searchParams.get("state")) throw new Error("invalid");
+          } catch {
+            authError = authCopy().invalid;
+            renderAuth();
+            el("auth-input").focus();
+            return;
+          }
+          void authRequest("submit", { id: authData.login.id, input });
+        });
+        document.addEventListener("visibilitychange", () => {
+          stopAuthPoll();
+          if (!document.hidden && authVisible) void authRequest("status");
+        });
+
+        function escapeHtml(value) {
+          return String(value == null ? "" : value)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
+
+        /**
+         * 颜色按「剩余」判定：绿色 = 还剩很多，橙/红 = 快用完。
+         * 阈值与「已用 <70 / 70–90 / ≥90」等价，只是换了参照物。
+         */
+        function severity(remainingPercent) {
+          if (remainingPercent < 10) return "bad";
+          if (remainingPercent < 30) return "warn";
+          return "good";
+        }
+
+        function formatClock(iso) {
+          const d = new Date(iso);
+          if (Number.isNaN(d.getTime())) return "";
+          return d.toLocaleTimeString(locale === "en" ? "en-US" : "zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+        }
+
+        /** 窗口时长的人话：300 分钟 → 5 小时，10080 → 7 天。 */
+        function humanizeMinutes(minutes) {
+          const m = Number(minutes);
+          if (!Number.isFinite(m) || m <= 0) return null;
+          if (m < 60) return locale === "en" ? `${m} min` : `${m} 分钟`;
+          if (m % 1440 === 0) {
+            const d = m / 1440;
+            return locale === "en" ? `${d} days` : `${d} 天`;
+          }
+          if (m % 60 === 0) {
+            const h = m / 60;
+            return locale === "en" ? `${h} hours` : `${h} 小时`;
+          }
+          return locale === "en" ? `${Math.round(m / 60)} hours` : `${Math.round(m / 60)} 小时`;
+        }
+
+        function resetText(iso) {
+          const c = t();
+          if (!iso) return "";
+          const target = Date.parse(iso);
+          if (!Number.isFinite(target)) return "";
+          const ms = target - Date.now();
+          if (ms <= 0) return c.resetNow;
+          if (ms < 60_000) return c.resetSoon;
+          const minutes = Math.floor(ms / 60_000);
+          if (minutes < 60) return c.resetMinutes(minutes);
+          const hours = Math.floor(minutes / 60);
+          if (hours < 24) return c.resetHours(hours, minutes % 60);
+          const days = Math.floor(hours / 24);
+          return c.resetDays(days, hours % 24);
+        }
+
+        function windowLabel(win) {
+          const c = t();
+          if (win.customLabel) return win.customLabel;
+          return (c.labels && c.labels[win.labelKey]) || c.labels["window.other"];
+        }
+
+        function actionButton(action, label, primary) {
+          return `<button class="qp-btn${primary ? " qp-btn-primary" : ""}" type="button" data-action="${action}">${escapeHtml(label)}</button>`;
+        }
+
+        // ── 渲染 ────────────────────────────────────────────────────────────
+        function renderWindow(win) {
+          const c = t();
+          const used = Math.max(0, Math.min(100, Number(win.usedPercent) || 0));
+          const remaining = Math.max(
+            0,
+            Math.min(100, win.remainingPercent == null ? 100 - used : Number(win.remainingPercent)),
+          );
+          const sev = severity(remaining);
+          // 进度条 = 剩余（绿），底槽 = 已用（灰）。百分比文本只格式化一次。
+          const remainingText = remaining.toFixed(remaining % 1 === 0 ? 0 : 1);
+          const usedText = used.toFixed(used % 1 === 0 ? 0 : 1);
+          const span = humanizeMinutes(win.windowMinutes);
+          const reset = resetText(win.resetsAt);
+          const resetTitle = win.resetsAt ? formatClock(win.resetsAt) : "";
+          const counts =
+            win.used != null && win.limit != null
+              ? `${win.used}${win.unit ? " " + win.unit : ""} / ${win.limit}${win.unit ? " " + win.unit : ""}`
+              : c.usedLabel(usedText);
+
+          return `
+            <div class="qp-window">
+              <div class="qp-window-head">
+                <div class="qp-window-name">
+                  <span class="qp-window-label">${escapeHtml(windowLabel(win))}</span>
+                  ${span ? `<span class="qp-window-span">${escapeHtml(c.span(span))}</span>` : ""}
+                </div>
+                <span class="qp-window-pct" data-sev="${sev}">
+                  <b>${remainingText}%</b>
+                  <span>${escapeHtml(c.remaining)}</span>
+                </span>
+              </div>
+              <div class="qp-bar" data-sev="${sev}" role="progressbar"
+                   aria-valuemin="0" aria-valuemax="100" aria-valuenow="${remaining}"
+                   aria-label="${escapeHtml(windowLabel(win))}"
+                   title="${escapeHtml(c.barTitle(remainingText, usedText))}">
+                <div class="qp-bar-fill" style="width:${remaining}%"></div>
+              </div>
+              <div class="qp-window-foot">
+                <span>${escapeHtml(counts)}</span>
+                ${
+                  reset
+                    ? `<span class="qp-reset" data-resets="${escapeHtml(win.resetsAt || "")}"
+                        ${resetTitle ? `title="${escapeHtml(resetTitle)}"` : ""}>${escapeHtml(reset)}</span>`
+                    : ""
+                }
+              </div>
+            </div>`;
+        }
+
+        function renderAccount(account) {
+          const c = t();
+          const windows = Array.isArray(account.windows) ? account.windows : [];
+          // 「最紧张」= 剩余最少的那个窗口，颜色也按它判定。
+          const lowestRemaining = windows.reduce((min, w) => {
+            const value =
+              w.remainingPercent == null
+                ? 100 - (Number(w.usedPercent) || 0)
+                : Number(w.remainingPercent);
+            return Math.min(min, Math.max(0, Math.min(100, value)));
+          }, 100);
+          const sev = windows.length ? severity(lowestRemaining) : null;
+          const initial = (account.label || account.provider || "?").trim().charAt(0);
+          const chips = [];
+          if (account.plan) chips.push(`<span class="qp-chip">${escapeHtml(account.plan)}</span>`);
+          if (account.demo) chips.push(`<span class="qp-chip">demo</span>`);
+          if (account.manual) chips.push(`<span class="qp-chip">manual</span>`);
+          // 昵称在标题里，邮箱放 chip；两者相同时（如 Claude 只有邮箱）不重复显示。
+          if (account.email && account.email !== account.identity) chips.push(`<span class="qp-chip qp-chip-mail">${escapeHtml(account.email)}</span>`);
+          if (windows.length) {
+            chips.push(
+              `<span class="qp-chip qp-chip-${sev}">${escapeHtml(
+                c.lowestRemaining(lowestRemaining.toFixed(lowestRemaining % 1 === 0 ? 0 : 1)),
+              )}</span>`,
+            );
+          }
+
+          let body = "";
+          if (windows.length) {
+            body = `<div class="qp-windows">${windows.map(renderWindow).join("")}</div>`;
+          } else if (account.status === "error") {
+            body = `<div class="qp-note qp-note-error"><span>${escapeHtml(
+              account.error || c.loadFailed,
+            )}</span></div>`;
+          } else {
+            body = `<div class="qp-note"><span>${escapeHtml(
+              account.hint || c.noWindows,
+            )}</span></div>`;
+          }
+
+          const dotClass =
+            account.status === "ok"
+              ? sev === "bad"
+                ? "qp-dot qp-dot-bad"
+                : sev === "warn"
+                  ? "qp-dot qp-dot-warn"
+                  : "qp-dot qp-dot-good"
+              : account.status === "error"
+                ? "qp-dot qp-dot-bad"
+                : "qp-dot";
+
+          return `
+            <article class="qp-card">
+              <div class="qp-card-head">
+                <span class="qp-brand" data-p="${escapeHtml(
+                  (account.provider || "").toLowerCase(),
+                )}">${escapeHtml(initial)}</span>
+                <div class="qp-card-title">
+                  <span class="qp-name" title="${escapeHtml(account.label || "")}">${escapeHtml(
+                    account.label || account.provider || "",
+                  )}</span>
+                  ${chips.length ? `<div class="qp-card-meta">${chips.join("")}</div>` : ""}
+                </div>
+                <span class="${dotClass}" aria-hidden="true"></span>
+              </div>
+              ${body}
+              ${renderReset(account)}
+            </article>`;
+        }
+
+        function renderBanner() {
+          const c = t();
+          const node = el("banner");
+          if (!snapshot) {
+            node.innerHTML = "";
+            return;
+          }
+          if (snapshot.demo) {
+            node.innerHTML = `<div class="qp-banner"><span class="qp-dot qp-dot-warn"></span><span class="qp-banner-text">${escapeHtml(
+              c.demoBanner,
+            )}</span>${actionButton("exit-demo", c.exitDemo, false)}</div>`;
+          } else if (snapshot.autoDetect) {
+            node.innerHTML = `<div class="qp-banner"><span class="qp-dot qp-dot-good"></span><span class="qp-banner-text">${escapeHtml(
+              c.realBanner,
+            )}</span></div>`;
+          } else {
+            node.innerHTML = "";
+          }
+        }
+
+        function render() {
+          const c = t();
+          el("title").textContent = c.title;
+          el("subtitle").textContent = c.subtitle;
+          document.documentElement.lang = locale === "en" ? "en" : "zh-CN";
+
+          const refreshBtn = el("refresh");
+          refreshBtn.title = loading ? c.refreshing : c.refresh;
+          refreshBtn.disabled = loading;
+          refreshBtn.innerHTML = loading ? '<span class="qp-spin">⟳</span>' : "⟳";
+
+          renderBanner();
+
+          const list = el("list");
+          const accounts = snapshot && Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
+          if (!snapshot) {
+            list.innerHTML = "";
+          } else if (!accounts.length) {
+            list.innerHTML = `<div class="qp-empty">
+                <h2>${escapeHtml(c.emptyTitle)}</h2>
+                <p>${escapeHtml(c.emptyBody)}</p>
+                ${actionButton("enter-demo", c.enterDemo, true)}
+              </div>`;
+          } else {
+            list.innerHTML = accounts.map(renderAccount).join("");
+          }
+
+          const foot = el("foot");
+          const parts = [];
+          if (standalone) parts.push(c.standalone);
+          if (snapshot && snapshot.generatedAt) {
+            parts.push(`${c.updated(formatClock(snapshot.generatedAt))}`);
+          } else if (!standalone) {
+            parts.push(c.never);
+          }
+          foot.innerHTML = parts.map((p) => `<div>${escapeHtml(p)}</div>`).join("");
+
+          el("updated").textContent = snapshot && snapshot.generatedAt
+            ? formatClock(snapshot.generatedAt)
+            : "";
+          renderAuth();
+          if (authVisible && !authBlocked() && !authReady && !authBusy) void authRequest("status");
+        }
+
+        /** 只更新倒计时文本，避免整页重渲染打断滚动与动画。 */
+        function tick() {
+          const nodes = document.querySelectorAll(".qp-reset[data-resets]");
+          for (const node of nodes) {
+            const iso = node.getAttribute("data-resets");
+            const text = resetText(iso);
+            if (text) node.textContent = text;
+            const target = Date.parse(iso);
+            if (Number.isFinite(target)) {
+              node.setAttribute("data-soon", target - Date.now() < 30 * 60_000 ? "true" : "false");
+            }
+          }
+        }
+
+        // ── 数据 ────────────────────────────────────────────────────────────
+        const DEMO_SNAPSHOT = (function () {
+          const now = Date.now();
+          const at = (ms) => new Date(now + ms).toISOString();
+          const hour = 3_600_000;
+          const day = 86_400_000;
+          return {
+            ok: true,
+            demo: true,
+            autoDetect: false,
+            refreshSeconds: 300,
+            generatedAt: new Date(now).toISOString(),
+            accounts: [
+              {
+                id: "demo-anthropic",
+                provider: "anthropic",
+                label: "Anthropic (Claude Pro/Max)",
+                plan: "max",
+                status: "ok",
+                demo: true,
+                windows: [
+                  { key: "five_hour", period: "session", labelKey: "window.session", windowMinutes: 300, usedPercent: 23.5, remainingPercent: 76.5, resetsAt: at(2.4 * hour) },
+                  { key: "seven_day", period: "week", labelKey: "window.week", windowMinutes: 10080, usedPercent: 58.1, remainingPercent: 41.9, resetsAt: at(3.4 * day) },
+                  { key: "seven_day_sonnet", period: "week", labelKey: "window.week.sonnet", windowMinutes: 10080, usedPercent: 88.6, remainingPercent: 11.4, resetsAt: at(3.4 * day) },
+                ],
+              },
+              {
+                id: "demo-openai",
+                provider: "openai-codex",
+                label: "OpenAI (ChatGPT Plus/Pro)",
+                plan: "plus",
+                status: "ok",
+                demo: true,
+                windows: [
+                  { key: "session-300", period: "session", labelKey: "window.session", windowMinutes: 300, usedPercent: 12, remainingPercent: 88, resetsAt: at(4.1 * hour) },
+                  { key: "week-10080", period: "week", labelKey: "window.week", windowMinutes: 10080, usedPercent: 41.7, remainingPercent: 58.3, resetsAt: at(5.2 * day) },
+                ],
+              },
+              {
+                id: "demo-copilot",
+                provider: "github-copilot",
+                label: "GitHub Copilot",
+                plan: "business",
+                status: "ok",
+                demo: true,
+                windows: [
+                  { key: "copilot-premium", period: "month", labelKey: "window.month", customLabel: "高级请求", windowMinutes: 43200, usedPercent: 32, remainingPercent: 68, resetsAt: at(12 * day) },
+                  { key: "copilot-chat", period: "month", labelKey: "window.month", customLabel: "聊天", windowMinutes: 43200, usedPercent: 7.5, remainingPercent: 92.5, resetsAt: at(12 * day) },
+                ],
+              },
+              {
+                id: "demo-openrouter",
+                provider: "openrouter",
+                label: "OpenRouter",
+                status: "ok",
+                demo: true,
+                windows: [
+                  { key: "openrouter-credit", period: "credit", labelKey: "window.credit", usedPercent: 27.4, remainingPercent: 72.6, used: 2.74, limit: 10, unit: "USD" },
+                ],
+              },
+            ],
+          };
+        })();
+
+        function schedulePoll() {
+          if (pollTimer) clearTimeout(pollTimer);
+          const seconds = Math.max(
+            30,
+            Number(snapshot && snapshot.refreshSeconds) || 300,
+          );
+          pollTimer = setTimeout(() => {
+            void load({ silent: true });
+          }, seconds * 1000);
+        }
+
+        async function load(options) {
+          const silent = options && options.silent;
+          if (loading) return;
+          loading = true;
+          if (!silent) render();
+          try {
+            if (standalone) {
+              snapshot = DEMO_SNAPSHOT;
+            } else {
+              const result = await bridgeInvoke("quota.snapshot", { force: !!(options && options.force) });
+              if (result && result.ok) {
+                snapshot = result;
+              } else if (!snapshot) {
+                snapshot = { ok: true, accounts: [], generatedAt: null, autoDetect: true, refreshSeconds: 300 };
+              }
+            }
+          } catch (error) {
+            if (!snapshot) {
+              snapshot = { ok: true, accounts: [], generatedAt: null, autoDetect: true, refreshSeconds: 300 };
+            }
+          } finally {
+            loading = false;
+            render();
+            schedulePoll();
+            flushAuthRefresh();
+          }
+        }
+
+        async function setDemo(enabled) {
+          if (standalone) {
+            snapshot = enabled ? DEMO_SNAPSHOT : { ok: true, accounts: [], generatedAt: null, autoDetect: true, refreshSeconds: 300 };
+            render();
+            return;
+          }
+          loading = true;
+          render();
+          try {
+            const result = await bridgeInvoke("quota.setDemo", { enabled });
+            if (result && result.ok) snapshot = result;
+          } catch {
+            /* 保持现状 */
+          } finally {
+            loading = false;
+            render();
+            schedulePoll();
+            flushAuthRefresh();
+          }
+        }
+
+        // ── 事件 ────────────────────────────────────────────────────────────
+        el("refresh").addEventListener("click", () => {
+          void load({ force: true });
+        });
+
+        document.addEventListener("click", (event) => {
+          const button = event.target.closest("[data-reset-action]");
+          if (button && !button.disabled) void resetAction(button.dataset.resetAccount, button.dataset.resetAction, button.dataset.resetCredit);
+        });
+        document.addEventListener("click", (event) => {
+          const target = event.target.closest("[data-action]");
+          if (!target) return;
+          const action = target.getAttribute("data-action");
+          if (action === "enter-demo") void setDemo(true);
+          else if (action === "exit-demo") void setDemo(false);
+        });
+
+        function applyAppearance(appearance) {
+          const base =
+            appearance && (appearance.base === "light" || appearance.base === "dark")
+              ? appearance.base
+              : window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          document.documentElement.dataset.base = base;
+          const nextLocale =
+            appearance && typeof appearance.locale === "string" && appearance.locale
+              ? appearance.locale.toLowerCase().startsWith("zh")
+                ? "zh-CN"
+                : "en"
+              : locale;
+          if (nextLocale !== locale) {
+            locale = nextLocale;
+            render();
+          }
+        }
+
+        if (window.pluginBridge && window.pluginBridge.on) {
+          window.pluginBridge.on("appearance:changed", applyAppearance);
+        }
+
+        if (standalone) {
+          applyAppearance(null);
+          void load({});
+        } else {
+          bridgeInvoke("app.getAppearance")
+            .then(applyAppearance)
+            .catch(() => applyAppearance(null));
+          void load({});
+        }
+
+        tickTimer = setInterval(tick, 1000);
+        window.addEventListener("beforeunload", () => {
+          authDisposed = true;
+          stopAuthPoll();
+          if (pollTimer) clearTimeout(pollTimer);
+          if (tickTimer) clearInterval(tickTimer);
+        });
+      })();
+    </script>
+  </body>
+</html>

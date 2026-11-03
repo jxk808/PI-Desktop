@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.czp0312.subscription-quota",
+  "name": "订阅额度",
+  "version": "0.4.3-host.1",
+  "description": "在工作面板中可视化订阅账号的剩余额度：Anthropic (Claude Pro/Max)、OpenAI (ChatGPT Plus/Pro)、GitHub Copilot、OpenRouter 等，按 5 小时 / 每周 / 每月 / 余额窗口显示剩余百分比、重置倒计时与进度条（绿=剩余、灰=已用）。只显示本机已登录的账号。",
+  "author": "czp0312",
+  "repository": "https://github.com/czp0312/pi-desktop-quota-visualizer",
+  "homepage": "https://github.com/czp0312/pi-desktop-quota-visualizer#readme",
+  "license": "MIT",
+  "categories": ["productivity"],
+  "changelog": "Local extension based on 0.4.2: display every native PI-Desktop Codex account through the host-owned models.usage API, plus the existing explicit reset-credit flow. The host performs quota requests with encrypted credentials; the plugin receives no tokens. Not an upstream release.",
+  "safetyNotes": "Local extension of the community quota plugin. With the high-risk models.usage grant, PI-Desktop may query normalized quota for native Codex accounts; the plugin receives labels, plans and windows, never credentials or upstream bodies. Separate plugin OAuth remains available. Manual Codex resets consume one official reset credit after explicit confirmation and cannot be undone. Only plugin OAuth OpenAI accounts can redeem; CLI/manual sources remain read-only. Redemption IDs and credit metadata are stored locally, without tokens, to resume an uncertain request using the same identity. Do not delete the operation record after a timeout. Requests reject redirects and require host capability support. No automatic redemption or additional network domains.",
+  "i18n": {
+    "en": {
+      "name": "Subscription Quotas",
+      "description": "Visualize the remaining quota of your subscription accounts in the work panel — Anthropic (Claude Pro/Max), OpenAI (ChatGPT Plus/Pro), GitHub Copilot, OpenRouter and more — as 5-hour / weekly / monthly / credit windows with remaining percentage, reset countdown and a progress bar (green = remaining, grey = used). Only accounts signed in on this machine are shown.",
+      "safetyNotes": "The models.usage grant lets PI-Desktop query native Codex quotas without exposing credentials to this plugin. OpenAI resets still use a separately plugin-authorized account and consume one official Codex reset credit after confirmation. Redemption is not reversible. Local operation records contain no tokens and preserve the same redemption ID after timeouts. No automatic resets, redirects or additional network domains."
+    },
+    "zh-CN": {
+      "name": "订阅额度",
+      "description": "在工作面板中可视化订阅账号的剩余额度：Anthropic (Claude Pro/Max)、OpenAI (ChatGPT Plus/Pro)、GitHub Copilot、OpenRouter 等，按 5 小时 / 每周 / 每月 / 余额窗口显示剩余百分比、重置倒计时与进度条（绿=剩余、灰=已用）。只显示本机已登录的账号。",
+      "safetyNotes": "models.usage 高风险权限允许 PI-Desktop 查询原生 Codex 账号额度，但不会向插件暴露凭据。OpenAI 手动重置仍需插件内独立授权，并会在确认后消耗 1 张官方 Codex 重置券，不可撤销。兑换记录不存令牌，用于超时后沿用同一兑换编号；不要删除待确认记录。CLI/手工来源只查询。无自动兑换、重定向或新增联网域名。"
+    }
+  },
+  "main": "main.js",
+  "ui": {
+    "panel": "views/quota.html",
+    "title": {
+      "en": "Subscription Quotas",
+      "zh-CN": "订阅额度"
+    },
+    "width": 540,
+    "height": 680
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "quota",
+        "title": {
+          "en": "Subscription Quotas",
+          "zh-CN": "订阅额度"
+        },
+        "icon": "target",
+        "entry": "views/quota.html",
+        "order": 25
+      }
+    ],
+    "commands": [
+      {
+        "id": "quota.open",
+        "title": "Subscription Quotas: Open Panel",
+        "keywords": [
+          "quota",
+          "usage",
+          "limit",
+          "额度",
+          "剩余",
+          "claude",
+          "chatgpt",
+          "copilot",
+          "openrouter"
+        ],
+        "category": "Subscription"
+      }
+    ],
+    "settings": [
+      {
+        "key": "autoDetect",
+        "title": "自动发现 CLI / 编辑器账号",
+        "description": "作为回退读取 Claude Code / Codex / Copilot 凭据文件。关闭后仍查询本插件授权和手工令牌账号。无需安装 CLI，可在面板的管理账号中单独登录。",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "demoMode",
+        "title": "演示数据（不访问网络）",
+        "description": "只渲染内置示例账号，便于预览界面。",
+        "type": "boolean",
+        "default": false
+      },
+      {
+        "key": "refreshSeconds",
+        "title": "自动刷新间隔（秒）",
+        "description": "面板打开时轮询新数据的间隔，最小 30 秒。",
+        "type": "number",
+        "default": 300
+      },
+      {
+        "key": "credentials",
+        "title": "手工令牌（JSON 对象）",
+        "description": "厂商 id → 令牌。例如 {\"openrouter\":\"sk-or-...\",\"anthropic\":\"...\",\"openai-codex\":\"...\",\"github-copilot\":\"...\",\"kimi-coding\":\"...\",\"meta\":\"...\",\"radius\":\"...\",\"xai\":\"...\"}。填了才算已登录。",
+        "type": "json",
+        "default": {}
+      },
+      {
+        "key": "sources",
+        "title": "自定义额度来源（JSON 数组）",
+        "description": "给没有内置适配器的厂商配置接口：{ vendor, label, url, token?, headers?, windows?: [{ path, period?, usedField?, resetField?, minutesField?, label? }] }。不写 windows 时按常见字段名自动识别。",
+        "type": "json",
+        "default": []
+      },
+      {
+        "key": "accounts",
+        "title": "手动额度（JSON 数组，不联网）",
+        "description": "直接手填窗口：{ id, label, plan?, windows: [{ period, label?, used?, limit?, unit?, usedPercent?, resetsAt? }] }。period 取 session / day / week / month / credit。",
+        "type": "json",
+        "default": []
+      }
+    ]
+  },
+  "permissions": ["ui.view", "ui.panel", "net.fetch", "shell.openExternal", "models.usage"],
+  "net": {
+    "domains": [
+      "auth.openai.com",
+      "platform.claude.com",
+      "github.com",
+      "api.anthropic.com",
+      "chatgpt.com",
+      "api.github.com",
+      "openrouter.ai",
+      "api.kimi.com",
+      "api.meta.ai",
+      "radius.pi.dev",
+      "api.x.ai"
+    ]
+  },
+  "engines": {
+    "piDesktop": ">=0.18.0-0"
+  },
+  "activationEvents": ["onStartup", "onCommand:quota.open"]
+}

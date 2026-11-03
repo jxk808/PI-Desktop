@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cliproxyapi-codex-oauth"
+version = "0.1.0"
+description = "Authenticate with Codex OAuth and import the account into an admin API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["playwright==1.63.0"]
+
+[project.scripts]
+codex-oauth = "codex_oauth:main"
+
+[tool.setuptools]
+py-modules = ["codex_oauth"]

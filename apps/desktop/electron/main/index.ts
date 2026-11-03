@@ -278,7 +278,12 @@ const modelsDevCatalog = new ModelsDevCatalog({
 });
 
 const codexBatchAutomation = new CodexBatchAutomation({
-  helperRoots: [process.env.PI_CODEX_AUTOMATION_ROOT, "O:\\AutoCodexAuth"].filter(
+  helperRoots: [
+    process.env.PI_CODEX_AUTOMATION_ROOT,
+    join(app.getPath("home"), ".pi-desktop", "codex-automation"),
+    join(app.getAppPath(), "..", "..", "custom", "auto-codex-auth"),
+    "O:\\AutoCodexAuth",
+  ].filter(
     (value): value is string => Boolean(value),
   ),
   pickCredentialsFile: async () => {

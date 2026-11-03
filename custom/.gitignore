@@ -1,0 +1,16 @@
+# Never commit credentials or generated runtimes.
+**/node_modules/
+**/.venv/
+**/.node-runtime/
+**/.playwright-browsers/
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/.env*
+**/号.txt
+**/auth.json
+**/credentials*
+**/accounts*.txt
+**/sessions/
+**/browser-profile*/
+**/profiles/
