@@ -52,6 +52,8 @@ export const PERMISSION_RISK: Record<string, RiskTier> = {
   "provider.register": "high",
   // The isolated plugin callback can read its own encrypted OAuth credentials.
   "provider.oauth": "high",
+  // Queries upstream quota with host-owned OAuth credentials; never returns tokens.
+  "models.usage": "high",
   "desktop.control": "high",
   "project.create": "high",
   "session.read": "high",

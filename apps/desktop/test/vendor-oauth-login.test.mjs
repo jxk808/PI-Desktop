@@ -17,6 +17,8 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
 import {
   VendorOAuth,
+  codexAccountLabel,
+  normalizeCodexUsageWindows,
   apiStyleForWireApi,
   isXaiConversationModel,
   protocolForApiStyle,
@@ -238,6 +240,22 @@ test("wire apis map to the provider row's api style and protocol", () => {
   assert.equal(protocolForApiStyle("pi_messages"), "custom_http");
 });
 
+
+
+test("Codex account labels prefer the OpenAI profile email", () => {
+  const payload = Buffer.from(JSON.stringify({
+    email: "top@example.com",
+    "https://api.openai.com/profile": { email: "profile@example.com" },
+  })).toString("base64url");
+  const access = `header.${payload}.signature`;
+  assert.equal(codexAccountLabel({
+    type: "oauth", access, refresh: "refresh", expires: Date.now() + 60_000,
+  }), "profile@example.com");
+  assert.equal(codexAccountLabel({
+    type: "oauth", access: "not-a-jwt", refresh: "refresh", expires: Date.now() + 60_000,
+  }), undefined);
+});
+
 test("vendors are derived from pi-ai, not hardcoded", async () => {
   const { oauth } = harness();
   assert.deepEqual(await oauth.listVendors(), [
@@ -249,6 +267,17 @@ test("vendors are derived from pi-ai, not hardcoded", async () => {
       accounts: [],
     },
   ]);
+});
+
+test("a batch login can suppress the system browser while still receiving the auth URL", async () => {
+  const { events, opened, oauth } = harness();
+  const { loginId } = await oauth.start({ vendorId: "anthropic", openExternal: false });
+  const authUrl = await waitFor(events, "authUrl");
+  assert.equal(authUrl.url, "https://claude.ai/oauth/authorize");
+  assert.equal(authUrl.opened, false);
+  assert.deepEqual(opened, []);
+  oauth.cancel(loginId);
+  await waitFor(events, "cancelled");
 });
 
 test("a completed login stores the credential and configures the row", async () => {
@@ -1402,4 +1431,99 @@ test("failed cleanup after a rejected login preserves the surviving account inst
   const rowId = [...h.host.providers.keys()][0];
   await h.oauth.listModels(rowId);
   assert.equal(attached.filter(account => account.id === rowId).length, 1);
+});
+
+
+test("host subscription usage keeps Codex accounts isolated and returns no tokens", async () => {
+  const host = fakeHost();
+  const jwt = (email) => `head.${Buffer.from(JSON.stringify({
+    "https://api.openai.com/profile": { email },
+  })).toString("base64url")}.sig`;
+  const rows = [
+    { id: "quota-a", email: "a@example.com", accountId: "account-a", access: jwt("a@example.com") },
+    { id: "quota-b", email: "b@example.com", accountId: "account-b", access: jwt("b@example.com") },
+  ];
+  for (const item of rows) {
+    host.providers.set(item.id, {
+      id: item.id,
+      name: "OpenAI (ChatGPT Plus/Pro)",
+      vendorKey: "openai-codex",
+      authKind: "oauth",
+      enabled: true,
+      oauthAccountLabel: "OpenAI (ChatGPT Plus/Pro)",
+    });
+    host.secrets.set(secretRefForProviderOauth(item.id), JSON.stringify({
+      type: "oauth",
+      access: item.access,
+      refresh: `refresh-${item.id}`,
+      expires: Date.now() + 60_000,
+      accountId: item.accountId,
+    }));
+  }
+  const requests = [];
+  const provider = {
+    id: "openai-codex",
+    name: "OpenAI",
+    baseUrl: "https://chatgpt.com/backend-api",
+    auth: { oauth: { name: "OpenAI (ChatGPT Plus/Pro)", isSubscription: true } },
+    getModels: () => [],
+  };
+  const oauth = new VendorOAuth({
+    call: host.call,
+    openExternal: async () => {},
+    createModels: (store) => fakeModels(store, { provider, models: [] }),
+    fetch: async (_url, init) => {
+      const headers = new Headers(init?.headers);
+      const accountId = headers.get("chatgpt-account-id");
+      const authorization = headers.get("authorization");
+      requests.push({ accountId, authorization });
+      const used = accountId === "account-a" ? 25 : 60;
+      return new Response(JSON.stringify({
+        plan_type: accountId === "account-a" ? "plus" : "pro",
+        rate_limit: {
+          primary_window: {
+            used_percent: used,
+            limit_window_seconds: 18_000,
+            reset_after_seconds: 120,
+          },
+          secondary_window: {
+            used_percent: used / 2,
+            limit_window_seconds: 604_800,
+            reset_after_seconds: 3_600,
+          },
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const usage = await oauth.listSubscriptionUsage();
+  assert.deepEqual(requests.map(({ accountId }) => accountId), ["account-a", "account-b"]);
+  assert.deepEqual(requests.map(({ authorization }, index) =>
+    authorization === `Bearer ${rows[index].access}`), [true, true]);
+  assert.deepEqual(usage.map((item) => ({
+    id: item.providerId,
+    label: item.accountLabel,
+    plan: item.plan,
+    status: item.status,
+    windows: item.windows.map((window) => [window.period, window.usedPercent]),
+  })), [
+    { id: "quota-a", label: "a@example.com", plan: "plus", status: "ok", windows: [["session", 25], ["week", 12.5]] },
+    { id: "quota-b", label: "b@example.com", plan: "pro", status: "ok", windows: [["session", 60], ["week", 30]] },
+  ]);
+  const serialized = JSON.stringify(usage);
+  for (const item of rows) {
+    assert.equal(serialized.includes(item.access), false);
+    assert.equal(serialized.includes(`refresh-${item.id}`), false);
+  }
+});
+
+test("Codex quota parser ignores malformed windows and clamps percentages", () => {
+  assert.deepEqual(normalizeCodexUsageWindows({
+    rate_limit: {
+      primary_window: { used_percent: 120, limit_window_seconds: 18_000 },
+      secondary_window: { used_percent: "bad" },
+    },
+  }).map((window) => ({ period: window.period, used: window.usedPercent, remaining: window.remainingPercent })), [
+    { period: "session", used: 100, remaining: 0 },
+  ]);
 });

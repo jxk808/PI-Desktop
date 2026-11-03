@@ -19,13 +19,14 @@
 import type {
   OAuthLoginEvent,
   OAuthRespondInput,
+  OAuthStartInput,
   OAuthStartResult,
 } from "@pi-desktop/shared";
 
 /** The slice of the preload API a login needs; injected so it can be tested. */
 export type OAuthLoginApi = {
   onOauthLogin: (listener: (event: OAuthLoginEvent) => void) => () => void;
-  startOauthLogin: (vendorId: string) => Promise<OAuthStartResult>;
+  startOauthLogin: (input: OAuthStartInput) => Promise<OAuthStartResult>;
   respondOauthLogin: (input: OAuthRespondInput) => Promise<{ ok: boolean }>;
   cancelOauthLogin: (loginId: string) => Promise<{ ok: boolean }>;
 };
@@ -47,9 +48,11 @@ export type OAuthLoginSession = {
 export function beginOAuthLogin({
   api,
   vendorId,
+  openExternal = true,
 }: {
   api: OAuthLoginApi;
   vendorId: string;
+  openExternal?: boolean;
 }): OAuthLoginSession {
   let loginId: string | null = null;
   let disposed = false;
@@ -73,7 +76,7 @@ export function beginOAuthLogin({
     if (event.loginId === loginId) deliver(event);
   });
 
-  const started = api.startOauthLogin(vendorId).then(
+  const started = api.startOauthLogin(openExternal ? vendorId : { vendorId, openExternal: false }).then(
     (result) => {
       loginId = result.loginId;
       const held = pending;

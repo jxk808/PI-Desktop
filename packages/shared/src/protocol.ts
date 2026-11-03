@@ -295,6 +295,14 @@ export const IPC = {
     providersOauthRespond: "pi-desktop/providers/oauth/respond",
     providersOauthCancel: "pi-desktop/providers/oauth/cancel",
     providersOauthDelete: "pi-desktop/providers/oauth/delete",
+    /** Select and validate a local Codex automation credentials file. */
+    providersCodexBatchSelect: "pi-desktop/providers/codexBatch/select",
+    /** Run the trusted local helper for one account and one PI-issued URL. */
+    providersCodexBatchRun: "pi-desktop/providers/codexBatch/run",
+    /** Terminate only the active helper so a failed account can be skipped. */
+    providersCodexBatchCancel: "pi-desktop/providers/codexBatch/cancel",
+    /** Forget the in-memory batch and terminate its helper, if still running. */
+    providersCodexBatchFinish: "pi-desktop/providers/codexBatch/finish",
     pluginList: "pi-desktop/plugin/list",
     /** A renderer slot component asking its own plugin for one JSON answer. */
     pluginRendererCall: "pi-desktop/plugin/rendererCall",

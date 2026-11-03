@@ -67,6 +67,7 @@ import {
   type PluginProviderOAuthPrompt,
   type PluginProviderOAuthRequest,
   type PluginProviderContrib,
+  type PluginSubscriptionUsageAccount,
   type PluginRevealViewInput,
   type PluginServiceContrib,
   type PluginSettingContrib,
@@ -488,6 +489,7 @@ export type PluginHostServices = {
   };
   onPluginUnload?: (pluginId: string) => void;
   listModels?: () => Promise<PluginModelInfo[]>;
+  listSubscriptionUsage?: () => Promise<PluginSubscriptionUsageAccount[]>;
   getSessionContext?: (sessionId: string, stripToolName?: string) => Promise<PluginLlmContext>;
   complete?: (input: PluginCompleteInput & {
     sessionId?: string;
@@ -628,6 +630,7 @@ const HOST_API_ALLOWLIST = new Set([
   "audio.closeOutput",
   "browser.cdp",
   "models.list",
+  "models.subscriptionUsage",
   "session.getActive",
   "session.getLlmContext",
   "session.getAutoTitleContext",
@@ -2576,6 +2579,9 @@ export class PluginRuntime {
       case "models.list":
         this.assertPermission(loaded, "models.list");
         return this.dispatchHostCall(loaded, "models.list", []);
+      case "models.subscriptionUsage":
+        this.assertPermission(loaded, "models.usage");
+        return this.dispatchHostCall(loaded, "models.subscriptionUsage", []);
       case "browser.navigate":
         return this.invokeBrowser(loaded, "navigate", payload);
       case "browser.action":
@@ -3073,6 +3079,18 @@ export class PluginRuntime {
           ts: Date.now(),
         });
         return models;
+      }
+      case "models.subscriptionUsage": {
+        this.assertPermission(loaded, "models.usage");
+        const accounts = (await this.services.listSubscriptionUsage?.()) ?? [];
+        this.services.audit?.({
+          pluginId,
+          api: "models.subscriptionUsage",
+          ok: true,
+          count: accounts.length,
+          ts: Date.now(),
+        });
+        return accounts;
       }
       case "session.getLlmContext": {
         return this.readSessionContext(loaded);

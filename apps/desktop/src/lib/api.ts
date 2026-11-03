@@ -51,6 +51,9 @@ import type {
   McpCatalogEntry,
   SkillCatalogEntry,
   ModelInfo,
+  OAuthStartInput,
+  CodexBatchRunInput,
+  CodexBatchSelection,
   McpServerInput,
   McpServerRecord,
   McpServerStatus,
@@ -978,8 +981,8 @@ export const api = {
   listOauthVendors: () =>
     invoke<{ vendors: OAuthVendor[] }>(IPC.invoke.providersOauthVendors),
   /** Begin a login; progress arrives through `onOauthLogin`. */
-  startOauthLogin: (vendorId: string) =>
-    invoke<OAuthStartResult>(IPC.invoke.providersOauthStart, vendorId),
+  startOauthLogin: (input: OAuthStartInput) =>
+    invoke<OAuthStartResult>(IPC.invoke.providersOauthStart, input),
   /** Answer a prompt; omitting the value cancels the login. */
   respondOauthLogin: (input: OAuthRespondInput) =>
     invoke<{ ok: boolean }>(IPC.invoke.providersOauthRespond, input),
@@ -987,6 +990,14 @@ export const api = {
     invoke<{ ok: boolean }>(IPC.invoke.providersOauthCancel, loginId),
   deleteOauthAccount: (providerId: string) =>
     invoke<{ ok: boolean }>(IPC.invoke.providersOauthDelete, providerId),
+  selectCodexBatch: () =>
+    invoke<CodexBatchSelection | null>(IPC.invoke.providersCodexBatchSelect),
+  runCodexBatchAccount: (input: CodexBatchRunInput) =>
+    invoke<{ ok: true }>(IPC.invoke.providersCodexBatchRun, input),
+  cancelCodexBatchAccount: (batchId: string) =>
+    invoke<{ ok: true }>(IPC.invoke.providersCodexBatchCancel, { batchId }),
+  finishCodexBatch: (batchId: string) =>
+    invoke<{ ok: true }>(IPC.invoke.providersCodexBatchFinish, { batchId }),
   getProject: () =>
     invoke<{ workspace: ProjectWorkspace | null }>(IPC.invoke.projectGet),
   listProjects: () =>

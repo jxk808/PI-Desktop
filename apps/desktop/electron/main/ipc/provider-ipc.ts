@@ -7,6 +7,7 @@ import {
   type ModelInfo,
   type ProviderReorderInput,
   type OAuthRespondInput,
+  type OAuthStartInput,
 } from "@pi-desktop/shared";
 import { OAUTH_AUTH_KIND, type VendorOAuth } from "../oauth";
 import { probeProviderEndpoint } from "../model-discovery";
@@ -311,11 +312,15 @@ export function registerProviderIpc({
   handle(IPC.invoke.providersOauthVendors, async () => {
     return { vendors: await vendorOAuth.listVendors() };
   });
-  handle(IPC.invoke.providersOauthStart, async (vendorId: unknown) => {
-    if (typeof vendorId !== "string" || !vendorId) {
-      throw new Error("vendorId required");
+  handle(IPC.invoke.providersOauthStart, async (input: unknown) => {
+    const request = input as OAuthStartInput;
+    const vendorId = typeof request === "string" ? request : request?.vendorId;
+    if (typeof vendorId !== "string" || !vendorId) throw new Error("vendorId required");
+    if (typeof request !== "string" && request.openExternal !== undefined &&
+        typeof request.openExternal !== "boolean") {
+      throw new Error("openExternal must be boolean");
     }
-    return vendorOAuth.start(vendorId);
+    return vendorOAuth.start(request);
   });
   handle(IPC.invoke.providersOauthRespond, async (input: unknown) => {
     const request = (input ?? {}) as OAuthRespondInput;

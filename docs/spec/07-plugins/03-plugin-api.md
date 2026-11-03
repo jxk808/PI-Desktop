@@ -501,6 +501,23 @@ Only enabled, authenticated provider rows are returned (API key, OAuth, or
 so a picker page can populate itself. When the host transport is unavailable,
 the call returns an empty list instead of warning (D080).
 
+### subscription usage (requires `models.usage`)
+
+```ts
+pi.models.subscriptionUsage(): Promise<PluginSubscriptionUsageAccount[]>
+```
+
+The Host queries normalized quota for each enabled, signed-in native subscription
+provider with that provider row's own encrypted OAuth credential. The return
+value is limited to provider id, vendor id, non-secret account label, plan,
+status, normalized quota windows, and sanitized errors. Access/refresh tokens,
+Authorization headers, upstream response bodies, account files, and mutation
+operations are never returned. Requests use the app's configured proxy and are
+serialized through the provider credential refresh lock.
+
+This is a high-risk grant because it causes the Host to contact the provider on
+the user's behalf, even though no credential crosses the plugin boundary.
+
 ### Provider entries in Add Service
 
 The Host exposes unconfigured, manifest-declared API-key providers in Settings

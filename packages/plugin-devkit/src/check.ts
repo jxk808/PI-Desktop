@@ -39,6 +39,7 @@ export const HIGH_RISK_PERMISSIONS = [
   "renderer.extension",
   "provider.register",
   "provider.oauth",
+  "models.usage",
   "desktop.control",
   "project.create",
   "session.read",
@@ -79,6 +80,7 @@ const PERMISSION_API_HINTS: Record<string, string[]> = {
   "agent.tool.register": ["agent.registerTool"],
   "speech.adapter.register": ["speech.registerAdapter"],
   "net.fetch": ["net.fetch"],
+  "models.usage": ["models.subscriptionUsage"],
   "audio.capture.background": [
     "audio.getInputDevices",
     "audio.openInput",

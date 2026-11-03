@@ -665,6 +665,7 @@ describe("PLUGIN_PERMISSIONS", () => {
       "composer.transform",
       "composer.suggest",
       "models.list",
+      "models.usage",
       "project.create",
       "session.read",
       "session.autoTitle",

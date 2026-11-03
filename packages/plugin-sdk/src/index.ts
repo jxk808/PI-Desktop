@@ -918,6 +918,29 @@ export type PluginModelInfo = {
   thinkingLevels: string[];
 };
 
+export type PluginSubscriptionUsageWindow = {
+  period: "session" | "day" | "week" | "month" | "credit" | "other";
+  labelKey: string;
+  windowMinutes: number | null;
+  usedPercent: number;
+  remainingPercent: number;
+  resetsAt: string | null;
+  used?: number;
+  limit?: number;
+  unit?: string | null;
+};
+
+export type PluginSubscriptionUsageAccount = {
+  providerId: string;
+  vendorId: string;
+  accountLabel?: string;
+  plan?: string | null;
+  status: "ok" | "empty" | "error";
+  windows: PluginSubscriptionUsageWindow[];
+  /** Sanitized host error; never an upstream body or credential. */
+  error?: string;
+};
+
 export type PluginLlmMessage = {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
@@ -1399,6 +1422,8 @@ export type PluginHostApi = {
   };
   models: {
     list: () => Promise<PluginModelInfo[]>;
+    /** Host-owned, normalized subscription quota; never credentials. */
+    subscriptionUsage: () => Promise<PluginSubscriptionUsageAccount[]>;
   };
   session: {
     getLlmContext: () => Promise<PluginLlmContext>;
@@ -1585,6 +1610,7 @@ export const PLUGIN_PERMISSIONS = [
   "provider.oauth",
   "desktop.control",
   "models.list",
+  "models.usage",
   "project.create",
   "session.read",
   "session.import",

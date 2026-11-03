@@ -337,6 +337,7 @@ export function createPluginServices({
     // and the session store, and a plugin reaching it would undo every other
     // limit on this list.
     protectedPaths: () => [dataDir],
+    listSubscriptionUsage: () => vendorOAuth.listSubscriptionUsage(),
     listModels: async () => {
       // Same D080 degrade as skills/MCP/subagent catalog reads: a dead
       // transport is expected during shutdown and supervised restarts.

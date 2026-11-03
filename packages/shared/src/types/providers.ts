@@ -169,6 +169,35 @@ export type OAuthLoginEvent = {
   | { kind: "cancelled" }
 );
 
+/** Start input remains string-compatible for existing sign-in callers. */
+export type OAuthStartInput =
+  | string
+  | {
+      vendorId: string;
+      /** False lets a trusted local helper drive the authorization URL. */
+      openExternal?: boolean;
+    };
+
+/** Renderer-safe metadata for one in-memory Codex batch. */
+export type CodexBatchSelection = {
+  batchId: string;
+  total: number;
+  fileName: string;
+};
+
+export type CodexBatchRunInput = {
+  batchId: string;
+  /** 1-based account position in the selected credentials file. */
+  index: number;
+  authorizationUrl: string;
+  /** True opens the helper browser visibly; false is the default headless mode. */
+  headed: boolean;
+};
+
+export type CodexBatchFinishInput = {
+  batchId: string;
+};
+
 export type OAuthStartResult = {
   loginId: string;
 };

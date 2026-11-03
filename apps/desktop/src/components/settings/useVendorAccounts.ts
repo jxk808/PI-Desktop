@@ -242,6 +242,7 @@ export function useVendorAccounts() {
 
   return {
     vendors,
+    reloadAccounts: loadVendors,
     accountFor,
     login,
     busyAccountId,

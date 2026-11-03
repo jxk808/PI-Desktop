@@ -49,6 +49,7 @@
 | `audio.playback.background` | 中等 | `pi.audio.openOutput`、`writeOutput`、`stopOutput`、`closeOutput`（已注册在插件 API 中并由该权限把关） | 安装时确认 | 播放队列由宿主持有，仅 PCM16。宿主目前还没有设备后端，所以获得授权的调用会以带错误码的 `UNSUPPORTED` 拒绝并记入审计；不会打开任何设备 |
 | `keyboard.globalShortcut` | 中等 | `pi.keyboard.registerGlobalShortcut`、`unregisterGlobalShortcut`、`listGlobalShortcuts`；`contributes.globalShortcuts` | 安装时确认 | 宿主持有 Electron 的 `globalShortcut`；快捷键只能运行插件自己的命令；冲突会被拒绝（`SHORTCUT_CONFLICT` / `SHORTCUT_UNAVAILABLE` / `INVALID_ACCELERATOR` / `LIMIT_EXCEEDED`，每个插件最多 8 条）；卸载、禁用或崩溃时释放 |
 | `models.list` | 中等 | `pi.models.list` | 安装时确认 | 仅已就绪的 provider/model 行；不含密钥 |
+| `models.usage` | 高 | `pi.models.subscriptionUsage` | 安装时确认 | 宿主使用每个已登录 Provider 的凭据查询标准化订阅额度；只返回 Provider ID、账号标签、套餐、额度窗口和脱敏错误。不返回 access/refresh token、Authorization 请求头、上游正文，也没有写入路径。 |
 | `project.create` | 高 | `pi.project.create` 及会话导入中的显式 `projectId` | 安装时确认 | 创建或复用持久项目记录但不激活工作区；只有显式传入 id 的导入会绑定项目 |
 | `session.read` | 高 | `pi.session.getLlmContext` | 安装时确认 | 仅限进行中的工具会话；带 compaction 的投影（D019 / D336） |
 | `session.autoTitle` | 高 | `pi.session.getAutoTitleContext`、`pi.session.setAutoTitle` | 安装时确认 | 仅限默认标题会话的首条用户提示（≤1,000 字符）和首条助手回复（≤500 字符）；标题通过比较并设置写入；不授予转录读取 |

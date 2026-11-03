@@ -493,6 +493,39 @@ metadata; an account model absent from the snapshot remains generic.
 | xai | xAI | chat_completions | device code |
 | radius | Radius | pi_messages | PKCE + local callback |
 
+### Trusted local Codex batch sign-in
+
+The model configuration page may batch-create native `openai-codex` vendor
+accounts from a user-selected local credentials text file. The file may live
+anywhere the user selects; the trusted `codex_oauth.py` helper and its project-local
+Python, Node, and Chromium runtimes are resolved from `PI_CODEX_AUTOMATION_ROOT`
+or the local `O:\AutoCodexAuth` installation. The main process validates the complete
+file first and keeps its absolute path in an in-memory batch record; the renderer receives only
+a random batch id, the base file name, and the account count.
+
+Accounts run strictly in file order. For each account the Host creates the
+ordinary independent OAuth provider row and PKCE flow, suppresses only the
+system-browser open, and passes the public OpenAI authorization URL plus a
+1-based account index to the local helper. The helper fills the OpenAI login
+page and stops when the browser reaches the Host-owned loopback callback. It
+never receives the PKCE verifier, authorization code, access token, refresh
+token, or a secret-store API. The Host remains responsible for callback state
+validation, code exchange, encrypted credential storage, model discovery, and
+half-created-row cleanup. A native Codex access token's signed-in identity claim is
+decoded locally for its non-secret email address; that email becomes
+`oauthAccountLabel`. Opening the vendor account list backfills older rows whose
+label still equals the generic vendor name. Tokens never enter the renderer or
+logs.
+
+Authorization URLs are accepted only for
+`https://auth.openai.com/oauth/authorize`, the built-in Codex client,
+`http://localhost:1455/auth/callback`, and PKCE S256. One helper runs at a time;
+output and runtime are bounded, cancellation terminates its process tree, and a
+failed account is skipped without sharing credentials with the next account.
+The selected text file contains plaintext passwords and TOTP seeds, so users
+must keep it local and restrict access. It is never imported into PI-Desktop,
+logged, synced, or returned to the renderer.
+
 ## 4. Model catalog cache record
 
 ```ts

@@ -325,6 +325,7 @@ function buildApi() {
     },
     models: {
       list: () => call("models.list"),
+      subscriptionUsage: () => call("models.subscriptionUsage"),
     },
     session: {
       // The selected session, as the shell shows it. A snapshot is a value: a

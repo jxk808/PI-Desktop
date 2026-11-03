@@ -37,6 +37,8 @@ import type {
   PluginProviderOAuthEvent,
   PluginProviderOAuthPrompt,
   PluginProviderOAuthRequest,
+  PluginSubscriptionUsageAccount,
+  PluginSubscriptionUsageWindow,
 } from "@pi-desktop/plugin-sdk";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -64,6 +66,7 @@ import {
   type OAuthPromptRequest,
   type OAuthRespondInput,
   type OAuthStartResult,
+  type OAuthStartInput,
   type OAuthVendor,
   type ModelBinding,
 } from "@pi-desktop/shared";
@@ -240,6 +243,8 @@ type LoginSession = {
   vendorId: string;
   providerId: string;
   account: AccountModels;
+  /** Batch automation receives the URL event but suppresses the system browser. */
+  openExternal: boolean;
   /** Whether this login created the row, and so owns cleaning it up on failure. */
   createdRow: boolean;
   controller: AbortController;
@@ -286,6 +291,39 @@ function promptRequest(
 
 function clippedText(value: unknown, maxLength: number): string {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function jwtPayload(token: unknown): Record<string, unknown> | undefined {
+  if (typeof token !== "string") return undefined;
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3 || !parts[1]) return undefined;
+    const parsed = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Non-secret identity label from an OpenAI-issued access token. */
+export function codexAccountLabel(credential: Credential | undefined): string | undefined {
+  if (credential?.type !== "oauth") return undefined;
+  const claims = jwtPayload(credential.access);
+  const profile = claims?.["https://api.openai.com/profile"];
+  const profileEmail = profile && typeof profile === "object" && !Array.isArray(profile)
+    ? (profile as Record<string, unknown>).email
+    : undefined;
+  const candidate = typeof profileEmail === "string"
+    ? profileEmail
+    : typeof claims?.email === "string"
+      ? claims.email
+      : undefined;
+  const email = candidate?.trim();
+  return email && email.length <= 256 && /^[^@\s]+@[^@\s]+$/.test(email)
+    ? email
+    : undefined;
 }
 
 function isHttpUrl(value: unknown): value is string {
@@ -373,6 +411,68 @@ function normalizePluginCredential(raw: unknown): PluginProviderOAuthCredential 
   return result;
 }
 
+function quotaNumber(value: unknown): number | null {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function quotaResetAt(raw: Record<string, unknown>): string | null {
+  const absolute = quotaNumber(raw.resets_at ?? raw.resetsAt ?? raw.reset_at ?? raw.resetAt);
+  const relative = quotaNumber(
+    raw.resets_in_seconds ?? raw.reset_after_seconds ?? raw.reset_in_seconds,
+  );
+  const milliseconds = absolute !== null
+    ? absolute < 10_000_000_000 ? absolute * 1_000 : absolute
+    : relative !== null ? Date.now() + relative * 1_000 : null;
+  if (milliseconds === null) return null;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+export function normalizeCodexUsageWindows(
+  data: Record<string, unknown>,
+): PluginSubscriptionUsageWindow[] {
+  const candidate = data.rate_limit ?? data.rate_limits ?? data.rateLimit ?? data;
+  const container = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : {};
+  const result: PluginSubscriptionUsageWindow[] = [];
+  for (const [value, fallback] of [
+    [container.primary_window ?? container.primaryWindow, "session"],
+    [container.secondary_window ?? container.secondaryWindow, "week"],
+  ] as const) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const raw = value as Record<string, unknown>;
+    const seconds = quotaNumber(
+      raw.limit_window_seconds ?? raw.limitWindowSeconds ?? raw.window_seconds,
+    );
+    const explicitMinutes = quotaNumber(raw.window_minutes ?? raw.windowMinutes);
+    const minutes = seconds !== null ? seconds / 60 : explicitMinutes;
+    const period = minutes === null
+      ? fallback
+      : minutes <= 360 ? "session"
+        : minutes <= 1_440 ? "day"
+          : minutes <= 11_000 ? "week" : "month";
+    const usedRaw = quotaNumber(raw.used_percent ?? raw.usedPercent ?? raw.utilization);
+    if (usedRaw === null) continue;
+    const usedPercent = Math.round(Math.max(0, Math.min(100, usedRaw)) * 10) / 10;
+    const used = quotaNumber(raw.used);
+    const limit = quotaNumber(raw.limit);
+    result.push({
+      period,
+      labelKey: `window.${period}`,
+      windowMinutes: minutes,
+      usedPercent,
+      remainingPercent: Math.round((100 - usedPercent) * 10) / 10,
+      resetsAt: quotaResetAt(raw),
+      ...(used !== null && limit !== null && limit > 0
+        ? { used, limit, unit: typeof raw.unit === "string" ? raw.unit : null }
+        : {}),
+    });
+  }
+  return result;
+}
+
 export class VendorOAuth {
   private readonly deps: VendorOAuthDeps;
   private readonly logins = new Map<string, LoginSession>();
@@ -399,31 +499,32 @@ export class VendorOAuth {
   async listVendors(): Promise<OAuthVendor[]> {
     const models = await this.ensureCatalogModels();
     const rows = await this.rows();
-    const vendors = models
+    const vendors = await Promise.all(models
       .getProviders()
       .filter((provider) => provider.auth.oauth)
-      .map((provider) => {
+      .map(async (provider) => {
         const oauth = provider.auth.oauth!;
-        const accounts = rows
+        const fallback = oauth.name || provider.name;
+        const accounts = await Promise.all(rows
           .filter(
             (candidate) =>
               candidate.authKind === OAUTH_AUTH_KIND &&
               !candidate.ownerPluginId &&
               candidate.vendorKey === provider.id,
           )
-          .map((row) => ({
+          .map(async (row) => ({
             providerId: row.id,
-            accountLabel: row.oauthAccountLabel || undefined,
+            accountLabel: await this.nativeAccountLabel(row, fallback),
             connected: row.hasOauth === true,
-          }));
+          })));
         return {
           vendorId: provider.id,
-          name: oauth.name || provider.name,
+          name: fallback,
           loginLabel: oauth.loginLabel,
           isSubscription: oauth.isSubscription === true,
           accounts,
         };
-      });
+      }));
     const pluginBridge = this.deps.getPluginOAuthBridge?.();
     if (!pluginBridge) return vendors;
     for (const provider of pluginBridge.listOAuthProviders()) {
@@ -455,7 +556,9 @@ export class VendorOAuth {
    * store, so signing into the same vendor twice creates two independent
    * accounts instead of silently replacing the first one.
    */
-  async start(vendorId: string): Promise<OAuthStartResult> {
+  async start(input: OAuthStartInput): Promise<OAuthStartResult> {
+    const vendorId = typeof input === "string" ? input : input.vendorId;
+    const openExternal = typeof input === "string" ? true : input.openExternal !== false;
     const pluginProvider = this.deps
       .getPluginOAuthBridge?.()
       ?.listOAuthProviders()
@@ -501,6 +604,7 @@ export class VendorOAuth {
       vendorId,
       providerId: row.id,
       account,
+      openExternal,
       createdRow: true,
       controller: new AbortController(),
       prompts: new Map(),
@@ -716,6 +820,107 @@ export class VendorOAuth {
     this.deps.onAccountRemoved?.(providerId);
     this.liveModelCache.delete(providerId);
     this.liveModelLoads.delete(providerId);
+  }
+
+  /** Normalized, token-free quota snapshots for trusted plugins. */
+  async listSubscriptionUsage(): Promise<PluginSubscriptionUsageAccount[]> {
+    const rows = (await this.rows()).filter(
+      (row) =>
+        row.vendorKey === "openai-codex" &&
+        row.authKind === OAUTH_AUTH_KIND &&
+        !row.ownerPluginId &&
+        row.enabled !== false &&
+        row.hasOauth === true,
+    );
+    const result: PluginSubscriptionUsageAccount[] = [];
+    for (const row of rows) {
+      const fallback = row.oauthAccountLabel?.trim() || row.name?.trim() || "OpenAI";
+      try {
+        // Resolves and refreshes under the row-scoped credential lock.
+        await this.resolveAuth(row.id);
+        const credential = await this.readCredential(row.id);
+        if (credential?.type !== "oauth" || typeof credential.access !== "string") {
+          throw new Error("OAuth credential is unavailable");
+        }
+        const accountId = typeof credential.accountId === "string"
+          ? credential.accountId.trim()
+          : "";
+        if (!accountId) throw new Error("OpenAI account id is unavailable");
+        const usage = await this.fetchCodexUsage(credential.access, accountId);
+        const windows = normalizeCodexUsageWindows(usage);
+        const plan = typeof usage.plan_type === "string" ? usage.plan_type : null;
+        result.push({
+          providerId: row.id,
+          vendorId: "openai-codex",
+          accountLabel: codexAccountLabel(credential) ?? fallback,
+          plan,
+          status: windows.length > 0 ? "ok" : "empty",
+          windows,
+        });
+      } catch (error) {
+        result.push({
+          providerId: row.id,
+          vendorId: "openai-codex",
+          accountLabel: fallback,
+          status: "error",
+          windows: [],
+          error: error instanceof Error ? error.message.slice(0, 256) : "Quota request failed",
+        });
+      }
+    }
+    return result;
+  }
+
+  private async fetchCodexUsage(
+    accessToken: string,
+    accountId: string,
+  ): Promise<Record<string, unknown>> {
+    const fetchImpl = this.deps.fetch ?? globalThis.fetch;
+    let notFound = false;
+    for (const url of [
+      "https://chatgpt.com/backend-api/wham/usage",
+      "https://chatgpt.com/backend-api/codex/usage",
+    ]) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const response = await fetchImpl(url, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${accessToken}`,
+            "chatgpt-account-id": accountId,
+            "user-agent": "pi-desktop/0.22 subscription-usage",
+          },
+          signal: controller.signal,
+        });
+        if (response.status === 404) {
+          notFound = true;
+          await response.body?.cancel();
+          continue;
+        }
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`OpenAI quota request failed (HTTP ${response.status})`);
+        }
+        const text = await response.text();
+        if (Buffer.byteLength(text, "utf8") > 512 * 1024) {
+          throw new Error("OpenAI quota response exceeded the safety limit");
+        }
+        const parsed = JSON.parse(text) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("OpenAI quota response was invalid");
+        }
+        return parsed as Record<string, unknown>;
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error("OpenAI quota request timed out");
+        if (error instanceof SyntaxError) throw new Error("OpenAI quota response was invalid");
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw new Error(notFound ? "OpenAI quota endpoint was not found" : "OpenAI quota request failed");
   }
 
   /**
@@ -951,7 +1156,7 @@ export class VendorOAuth {
     try {
       const installationId = await this.getInstallationId();
       session.controller.signal.throwIfAborted();
-      await this.withRowHeaders(session.providerId, () =>
+      const credential = await this.withRowHeaders(session.providerId, () =>
         session.account.models.login(
           session.vendorId,
           "oauth",
@@ -959,7 +1164,9 @@ export class VendorOAuth {
           { getDeviceId: () => installationId },
         ),
       );
-      const accountLabel = provider.auth.oauth?.name || provider.name;
+      const accountLabel = session.vendorId === "openai-codex"
+        ? codexAccountLabel(credential) ?? provider.auth.oauth?.name ?? provider.name
+        : provider.auth.oauth?.name || provider.name;
       await this.completeRow(session, provider, accountLabel);
       this.push(session, {
         kind: "done",
@@ -1202,6 +1409,31 @@ export class VendorOAuth {
     this.liveModelLoads.delete(providerId);
   }
 
+  private async nativeAccountLabel(
+    row: OAuthProviderRow,
+    fallback: string,
+  ): Promise<string | undefined> {
+    const saved = row.oauthAccountLabel?.trim();
+    if (row.vendorKey !== "openai-codex" || !row.hasOauth) return saved || undefined;
+    if (saved && saved !== fallback && saved !== row.name) return saved;
+    const derived = codexAccountLabel(await this.readCredential(row.id));
+    if (!derived) return saved || undefined;
+    if (derived !== saved) {
+      try {
+        await this.deps.call("providers.update", {
+          id: row.id,
+          oauthAccountLabel: derived,
+        });
+      } catch (error) {
+        this.log("warn", "could not backfill Codex account label", {
+          providerId: row.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return derived;
+  }
+
   /** Point the row at a usable model now that the catalog can be read. */
   private async completeRow(
     session: LoginSession,
@@ -1354,12 +1586,14 @@ export class VendorOAuth {
     instructions?: string,
   ): void {
     session.tail = session.tail.then(async () => {
-      // Report whether the browser actually opened: when it did not, the
-      // renderer has to offer the link for copying instead.
-      const opened = await this.deps.openExternal(url).then(
-        () => true,
-        () => false,
-      );
+      // Batch automation still receives the URL, but its trusted helper opens
+      // it with the account selected from the main-process-only file path.
+      const opened = session.openExternal
+        ? await this.deps.openExternal(url).then(
+            () => true,
+            () => false,
+          )
+        : false;
       this.deps.emit({
         loginId: session.loginId,
         vendorId: session.vendorId,

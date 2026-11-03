@@ -278,6 +278,29 @@ MiniMax (OpenAI)（`chat_completions`，`https://api.minimaxi.com/v1`，别名
 | xai | xAI | chat_completions | 设备码 |
 | radius | Radius | pi_messages | PKCE + 本地回调 |
 
+### 受信任的本地 Codex 批量登录
+
+模型配置页可以从用户主动选择的本地账号文本文件中，批量创建原生
+`openai-codex` 厂商账户。账号文件可以位于用户选择的任意位置；受信任的
+`codex_oauth.py` 助手及其项目内 Python、Node 和 Chromium 运行时从
+`PI_CODEX_AUTOMATION_ROOT` 或本机 `O:\AutoCodexAuth` 安装目录解析。主进程先校验整份文件，并只在内存批次
+记录中保存绝对路径；渲染进程只能得到随机批次 ID、文件名和账号数量。
+
+账号严格按文件顺序逐个处理。每个账号仍由 Host 创建普通的独立 OAuth Provider 行和
+PKCE 流程；Host 只禁止系统浏览器自动打开，再把公开的 OpenAI 授权 URL 和 1-based 账号
+序号交给本地助手。助手负责填写 OpenAI 登录页面，并在浏览器到达 Host 拥有的回环回调后
+停止。它不会取得 PKCE verifier、授权码、access token、refresh token 或密钥库 API。
+回调 state 校验、授权码交换、凭据加密保存、模型发现和半成品行清理由 Host 继续负责。
+原生 Codex access token 中的登录身份 claim 会在本地解析出非敏感邮箱，并写入
+`oauthAccountLabel`；打开厂商账户列表时，还会自动回填标签仍为通用厂商名的旧 Provider。
+Token 不会进入渲染进程或日志。
+
+只接受 `https://auth.openai.com/oauth/authorize`、内置 Codex 客户端、
+`http://localhost:1455/auth/callback` 和 PKCE S256。任意时刻只运行一个助手；输出和运行时间
+有上限，取消会终止其进程树，单个账号失败后会跳过且不会把凭据带给下一个账号。所选文本
+文件含明文密码和 TOTP 密钥，用户必须只在本机保存并限制访问；PI-Desktop 不会导入、
+记录、同步该文件，也不会把其路径或内容返回渲染进程。
+
 ## 4. 模型目录缓存记录
 
 ```ts

@@ -419,6 +419,19 @@ type PluginModelInfo = {
 只返回已启用且已认证的 provider 行（API key、OAuth 或 `authKind: "none"`）。不含密钥。
 `models.list` 也是面板桥通道，选择器页面可以自行填充。宿主传输不可用时返回空列表，不记警告（D080）。
 
+### 订阅额度（需要 `models.usage`）
+
+```ts
+pi.models.subscriptionUsage(): Promise<PluginSubscriptionUsageAccount[]>
+```
+
+宿主会使用每个已启用、已登录原生订阅 Provider 自己的加密 OAuth 凭据，查询标准化额度。
+返回值只包含 Provider ID、厂商 ID、非敏感账号标签、套餐、状态、标准化额度窗口和脱敏错误。
+不会返回 access/refresh token、Authorization 请求头、上游响应正文、账号文件或任何写入操作。
+请求遵循应用代理设置，并通过 Provider 凭据刷新锁串行化。
+
+虽然凭据不会跨越插件边界，该权限仍是高风险权限，因为它会让宿主代表用户联系厂商。
+
 ### provider OAuth（需要 `provider.oauth`）
 
 OAuth provider 声明需要同时拥有 `provider.register` 和 `provider.oauth`、设置

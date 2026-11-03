@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   powerMonitor,
   session,
@@ -39,6 +40,7 @@ import {
   catalogModelConfigFor,
 } from "./models-dev-catalog";
 import { VendorOAuth } from "./oauth";
+import { CodexBatchAutomation } from "./codex-batch-automation";
 import { AppUpdaterController } from "./updater";
 import {
   WINDOW_MIN_HEIGHT,
@@ -273,6 +275,24 @@ const modelsDevCatalog = new ModelsDevCatalog({
   catalogPath: app.isPackaged
     ? join(process.resourcesPath, "models.dev", "api.json")
     : join(app.getAppPath(), "resources", "models.dev", "api.json"),
+});
+
+const codexBatchAutomation = new CodexBatchAutomation({
+  helperRoots: [process.env.PI_CODEX_AUTOMATION_ROOT, "O:\\AutoCodexAuth"].filter(
+    (value): value is string => Boolean(value),
+  ),
+  pickCredentialsFile: async () => {
+    const options = {
+      title: "Select Codex account credentials",
+      properties: ["openFile" as const],
+      filters: [{ name: "Text files", extensions: ["txt"] }],
+    };
+    const owner = getMainWindow();
+    const result = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  },
 });
 
 const vendorOAuth = new VendorOAuth({
@@ -930,6 +950,7 @@ function registerIpc() {
     resolveEffectiveCommandShell,
     modelsDevCatalog,
     vendorOAuth,
+    codexBatchAutomation,
     enrichProvider,
     listRuntimeProviders,
     enrichProviderList,

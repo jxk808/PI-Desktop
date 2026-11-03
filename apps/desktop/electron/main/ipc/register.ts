@@ -19,6 +19,7 @@ import { registerPluginIpc } from "./plugin-ipc";
 import { registerPluginUiIpc } from "./plugin-ui-ipc";
 import { registerJevIpc } from "./jev-ipc";
 import { registerProviderIpc } from "./provider-ipc";
+import { registerCodexBatchIpc } from "./codex-batch-ipc";
 import { registerScheduledIpc } from "./scheduled-ipc";
 import { registerSessionIpc } from "./session-ipc";
 import { registerSettingsIpc } from "./settings-ipc";
@@ -138,6 +139,7 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     resolveEffectiveCommandShell,
     modelsDevCatalog,
     vendorOAuth,
+    codexBatchAutomation,
     enrichProvider,
     listRuntimeProviders,
     enrichProviderList,
@@ -331,6 +333,7 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     bindingForModel,
     onProviderInvalidated: (providerId) => liveCallService?.invalidateProvider(providerId),
   });
+  registerCodexBatchIpc({ registrar, automation: codexBatchAutomation });
   registerJevIpc({ registrar, logger });
   registerWorktreeIpc({
     registrar,

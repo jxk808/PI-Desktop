@@ -7,7 +7,7 @@
  * vendor-account editor and `deleteOauthAccount`, never the provider CRUD.
  *
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   vendorAccountImageCandidates,
@@ -32,6 +32,11 @@ import {
 import { copyProviderConfiguration, type ProviderCopyDraft } from "./provider-copy";
 import { ImageGenerationModelRow } from "./ImageGenerationModelRow";
 import { OAuthLoginDialog } from "./OAuthLoginDialog";
+import { CodexBatchDialog } from "./CodexBatchDialog";
+import {
+  CodexBatchController,
+  type CodexBatchState,
+} from "../../lib/codex-batch-controller";
 import { ProviderSetupDialog } from "./ProviderSetupDialog";
 import { ServiceList } from "./ServiceList";
 import { serviceRowKind } from "./service-row-status";
@@ -111,6 +116,7 @@ export function ModelConfigPage() {
   const [importOpen, setImportOpen] = useState(false);
   const {
     vendors,
+    reloadAccounts,
     accountFor,
     login,
     busyAccountId,
@@ -122,6 +128,16 @@ export function ModelConfigPage() {
     saveAccount,
   } = useVendorAccounts();
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [codexBatchState, setCodexBatchState] = useState<CodexBatchState | null>(null);
+  const codexBatchController = useRef<CodexBatchController | null>(null);
+  const codexBatchUnsubscribe = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => {
+    codexBatchUnsubscribe.current?.();
+    codexBatchUnsubscribe.current = null;
+    void codexBatchController.current?.cancel();
+    codexBatchController.current = null;
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -146,6 +162,36 @@ export function ModelConfigPage() {
   );
   const providerReady = (provider: ProviderPublic) =>
     providerServesChatModels(provider, imageGenerationCandidates);
+  const canBatchCodex = vendors?.some((vendor) => vendor.vendorId === "openai-codex") === true;
+
+  const startCodexBatch = () => {
+    if (codexBatchController.current) return;
+    const controller = new CodexBatchController({
+      api,
+      onComplete: async () => {
+        await Promise.all([reloadAccounts(), refreshProviders()]);
+      },
+    });
+    codexBatchController.current = controller;
+    codexBatchUnsubscribe.current = controller.subscribe((next) => {
+      setCodexBatchState(next.phase === "idle" ? null : next);
+    });
+    void controller.start().then((started) => {
+      if (started || controller.snapshot().phase !== "idle") return;
+      codexBatchUnsubscribe.current?.();
+      codexBatchUnsubscribe.current = null;
+      codexBatchController.current = null;
+    });
+  };
+
+  const closeCodexBatch = async () => {
+    const controller = codexBatchController.current;
+    codexBatchUnsubscribe.current?.();
+    codexBatchUnsubscribe.current = null;
+    codexBatchController.current = null;
+    setCodexBatchState(null);
+    await controller?.close();
+  };
 
   if (!settings) return null;
 
@@ -418,6 +464,15 @@ export function ModelConfigPage() {
             ) : null}
           </div>
           <div className="provider-section-head-actions">
+            {canBatchCodex ? (
+              <Button
+                variant="secondary"
+                disabled={login !== null || codexBatchState !== null}
+                onClick={startCodexBatch}
+              >
+                {t("settings.codexBatchButton")}
+              </Button>
+            ) : null}
             <ImportToggleButton
               open={importOpen}
               controls="model-config-import-panel"
@@ -471,7 +526,11 @@ export function ModelConfigPage() {
                 editingAccountId !== null ||
                 busyAccountId !== null ||
                 savingAccount ||
-                login !== null
+                login !== null ||
+                (codexBatchState !== null &&
+                  codexBatchState.phase !== "completed" &&
+                  codexBatchState.phase !== "cancelled" &&
+                  codexBatchState.phase !== "error")
               }
               isRowBusy={(id) => busyId === id || testingId === id || busyAccountId === id}
               testingId={testingId}
@@ -614,6 +673,14 @@ export function ModelConfigPage() {
           saving={savingAccount}
           onClose={() => setEditingAccountId(null)}
           onSave={(form) => void saveEditingAccount(editingAccount, form)}
+        />
+      ) : null}
+
+      {codexBatchState ? (
+        <CodexBatchDialog
+          state={codexBatchState}
+          onCancel={() => void codexBatchController.current?.cancel()}
+          onClose={() => void closeCodexBatch()}
         />
       ) : null}
 

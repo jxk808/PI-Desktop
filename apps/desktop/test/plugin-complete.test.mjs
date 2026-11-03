@@ -349,3 +349,56 @@ test("the plugin completion declares INVALID_ARGUMENT for empty model output", a
   );
   assert.match(source, /emptyErrorCode: "INVALID_ARGUMENT"/);
 });
+
+
+test("subscription usage is token-free and requires models.usage", async (t) => {
+  const snapshot = [{
+    providerId: "codex-a",
+    vendorId: "openai-codex",
+    accountLabel: "a@example.com",
+    plan: "plus",
+    status: "ok",
+    windows: [{ period: "session", labelKey: "window.session", windowMinutes: 300,
+      usedPercent: 20, remainingPercent: 80, resetsAt: null }],
+  }];
+  const makeRuntime = () => new PluginRuntime({
+    hostEntry: hostProcessEntry,
+    spawnProcess: forkPluginProcess,
+    listSubscriptionUsage: async () => structuredClone(snapshot),
+  });
+  const main = `
+    module.exports = {
+      async onLoad() {
+        await pi.agent.registerTool({
+          name: "quota",
+          description: "quota",
+          schema: { type: "object", properties: {} },
+          execute: () => pi.models.subscriptionUsage(),
+        });
+      },
+    };
+  `;
+
+  const allowed = makeRuntime();
+  t.after(async () => {
+    for (const runtime of [allowed]) {
+      for (const loaded of runtime.listLoaded()) await runtime.unload(loaded.manifest.id);
+    }
+  });
+  const allowedDir = writePlugin({ permissions: ["agent.tool.register", "models.usage"], main });
+  await allowed.loadFromPath(allowedDir, ["agent.tool.register", "models.usage"]);
+  const result = await allowed.getTools()[0].execute({}, { sessionId: "s" });
+  assert.deepEqual(result, snapshot);
+  assert.equal(JSON.stringify(result).includes("token"), false);
+
+  const denied = makeRuntime();
+  t.after(async () => {
+    for (const loaded of denied.listLoaded()) await denied.unload(loaded.manifest.id);
+  });
+  const deniedDir = writePlugin({ permissions: ["agent.tool.register"], main });
+  await denied.loadFromPath(deniedDir, ["agent.tool.register"]);
+  await assert.rejects(
+    () => denied.getTools()[0].execute({}, { sessionId: "s" }),
+    /models\.usage|PERMISSION_DENIED|permission/i,
+  );
+});

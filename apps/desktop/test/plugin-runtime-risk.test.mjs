@@ -47,6 +47,8 @@ test("plugin runtime exposes gated high-risk host APIs", () => {
     "session.read",
     "session.autoTitle",
     "models.list",
+    "models.usage",
+    "models.subscriptionUsage",
     "shell.openExternal",
     "clipboard.read",
     "clipboard.write",
@@ -116,6 +118,8 @@ test("the plugins page shows the file scope behind a file permission", () => {
     assert.equal(typeof catalog.plugins.permissions["session.autoTitle"], "string");
     assert.equal(typeof catalog.plugins.permissionHelp["session.autoTitle"], "string");
     assert.equal(typeof catalog.plugins.permissions["models.list"], "string");
+    assert.equal(typeof catalog.plugins.permissions["models.usage"], "string");
+    assert.equal(typeof catalog.plugins.permissionHelp["models.usage"], "string");
     assert.equal(typeof catalog.plugins.permissions["ui.microphone"], "string");
     assert.equal(typeof catalog.plugins.permissionHelp["ui.microphone"], "string");
     assert.equal(typeof catalog.plugins.permissions["desktop.control"], "string");
