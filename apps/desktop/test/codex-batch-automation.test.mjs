@@ -43,6 +43,7 @@ function harness(outputs) {
   const children = [];
   const automation = new CodexBatchAutomation({
     pickCredentialsFile: async () => "O:\\AutoCodexAuth\\号.txt",
+    helperRoots: ["D:\\Installed app 中文\\resources\\codex-automation"],
     pathExists: async () => {},
     newId: () => "batch-1",
     platform: "win32",
@@ -74,12 +75,12 @@ test("authorization URL accepts only the PI OpenAI PKCE callback", () => {
   ]) assert.throws(() => validateCodexAuthorizationUrl(bad));
 });
 
-test("selection validates beside the chosen file and returns no path", async () => {
+test("selection uses trusted portable Python, never code beside credentials", async () => {
   const h = harness([{ stdout: '{"event":"validated","count":2}\n' }]);
   const selected = await h.automation.select();
   assert.deepEqual(selected, { batchId: "batch-1", total: 2, fileName: "号.txt" });
   assert.equal(JSON.stringify(selected).includes("AutoCodexAuth"), false);
-  assert.equal(h.calls[0].executable, "O:\\AutoCodexAuth\\.venv\\Scripts\\python.exe");
+  assert.equal(h.calls[0].executable, "D:\\Installed app 中文\\resources\\codex-automation\\.python-runtime\\python.exe");
   assert.deepEqual(h.calls[0].args.slice(-2), ["--validate-only", "--json-events"]);
 });
 
@@ -138,7 +139,7 @@ test("finish forgets the batch and terminates an active helper", async () => {
 
 test("credentials file may live outside the trusted helper root", async () => {
   const calls = [];
-  const helperRoot = "O:\\AutoCodexAuth";
+  const helperRoot = "D:\\Installed app 中文\\resources\\codex-automation";
   const automation = new CodexBatchAutomation({
     pickCredentialsFile: async () => "C:\\Users\\Administrator\\Downloads\\accounts.txt",
     helperRoots: [helperRoot],
@@ -159,6 +160,21 @@ test("credentials file may live outside the trusted helper root", async () => {
   });
   const selected = await automation.select();
   assert.deepEqual(selected, { batchId: "batch-external", total: 3, fileName: "accounts.txt" });
-  assert.equal(calls[0].executable, "O:\\AutoCodexAuth\\.venv\\Scripts\\python.exe");
+  assert.equal(calls[0].executable, `${helperRoot}\\.python-runtime\\python.exe`);
   assert.ok(calls[0].args.includes("C:\\Users\\Administrator\\Downloads\\accounts.txt"));
+});
+
+test("missing portable components fail without fixed-drive advice or credential-directory probing", async () => {
+  const checked = [];
+  const automation = new CodexBatchAutomation({
+    pickCredentialsFile: async () => "C:\\private\\accounts.txt",
+    helperRoots: ["D:\\resources\\codex-automation"],
+    pathExists: async (path) => { checked.push(path); throw new Error("missing"); },
+  });
+  await assert.rejects(automation.select(), (error) => {
+    assert.match(error.message, /resources\/codex-automation/);
+    assert.doesNotMatch(error.message, /O:|AutoCodexAuth/);
+    return true;
+  });
+  assert.ok(checked.every((path) => !path.includes("private")));
 });

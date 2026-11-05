@@ -60,9 +60,10 @@ PI-Desktop 内部调用的命令如下；通常不需要手动执行：
 
 安全限制：外部授权 URL 必须使用 OpenAI 官方 HTTPS 主机、固定客户端 ID、
 `http://localhost:1455/auth/callback` 回调和 PKCE S256，否则脚本会在打开浏览器前拒绝。
-账号文件仍包含明文密码和 TOTP 密钥，应只保存在本机并限制访问。文件可以位于任意
-目录；自定义 PI-Desktop 默认从 `O:\AutoCodexAuth` 启动助手，也可通过
-`PI_CODEX_AUTOMATION_ROOT` 环境变量指定其他助手目录。
+Account files contain plaintext passwords and TOTP keys; keep them outside the application and restrict access.
+The custom PI-Desktop installer uses the complete portable runtime in `process.resourcesPath/codex-automation` first.
+`PI_CODEX_AUTOMATION_ROOT` is an explicit fallback to another complete portable runtime, not a default developer drive.
+Target machines do not need this README's legacy development setup; see [portable runtime preparation](../AUTOMATION-RUNTIME.md) for build-time provisioning.
 
 ## 当前进度
 

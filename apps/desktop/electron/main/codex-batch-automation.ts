@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
+import { CODEX_PORTABLE_COMPONENTS, resolveCodexAutomationRoots } from "./codex-batch-runtime";
 import type {
   CodexBatchRunInput,
   CodexBatchSelection,
@@ -112,7 +113,11 @@ export class CodexBatchAutomation {
   >;
 
   constructor(deps: CodexBatchAutomationDependencies) {
-    this.helperRoots = [...new Set((deps.helperRoots ?? []).filter(Boolean))];
+    this.helperRoots = resolveCodexAutomationRoots({
+      resourcesPath: process.resourcesPath,
+      overrideRoot: process.env.PI_CODEX_AUTOMATION_ROOT,
+    });
+    this.helperRoots = [...new Set([...this.helperRoots, ...(deps.helperRoots ?? [])].filter(Boolean))];
     this.deps = {
       pickCredentialsFile: deps.pickCredentialsFile,
       spawnHelper: deps.spawnHelper ?? ((executable, args, options) =>
@@ -138,23 +143,14 @@ export class CodexBatchAutomation {
   async select(): Promise<CodexBatchSelection | null> {
     const credentialsPath = await this.deps.pickCredentialsFile();
     if (!credentialsPath) return null;
-    const candidates = [...new Set([dirname(credentialsPath), ...this.helperRoots])];
+    const candidates = this.helperRoots;
     let projectRoot = "";
     let pythonPath = "";
     let scriptPath = "";
     for (const candidate of candidates) {
-      const candidatePython = this.deps.platform === "win32"
-        ? join(candidate, ".venv", "Scripts", "python.exe")
-        : join(candidate, ".venv", "bin", "python");
+      const candidatePython = join(candidate, ".python-runtime", "python.exe");
       const candidateScript = join(candidate, "codex_oauth.py");
-      const required = [
-        candidatePython,
-        candidateScript,
-        join(candidate, "turnstile_browser_bridge.js"),
-        join(candidate, ".node-runtime"),
-        join(candidate, ".playwright-browsers"),
-        join(candidate, "node_modules"),
-      ];
+      const required = CODEX_PORTABLE_COMPONENTS.map((component) => join(candidate, component));
       try {
         for (const path of required) await this.deps.pathExists(path);
       } catch {
@@ -167,7 +163,7 @@ export class CodexBatchAutomation {
     }
     if (!projectRoot) {
       throw new Error(
-        `Codex automation runtime was not found. Set PI_CODEX_AUTOMATION_ROOT or keep it at O:\\AutoCodexAuth`,
+        "Codex automation runtime is missing or incomplete. Reinstall resources/codex-automation or explicitly set PI_CODEX_AUTOMATION_ROOT to a complete portable runtime.",
       );
     }
 
@@ -263,7 +259,14 @@ export class CodexBatchAutomation {
     return new Promise((resolve, reject) => {
       const child = this.deps.spawnHelper(batch.pythonPath, args, {
         cwd: batch.projectRoot,
-        env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" },
+        env: {
+          ...process.env,
+          NO_PROXY: "127.0.0.1,localhost",
+          PYTHONUTF8: "1",
+          PYTHONNOUSERSITE: "1",
+          PYTHONDONTWRITEBYTECODE: "1",
+          PLAYWRIGHT_BROWSERS_PATH: join(batch.projectRoot, ".playwright-browsers"),
+        },
         windowsHide: true,
       });
       if ("child" in batch) batch.child = child;

@@ -1,0 +1,28 @@
+Portable Codex automation third-party notices
+
+This distribution retains the original license texts supplied by its dependencies.
+This notice is an index, not a replacement for those texts.
+
+Python 3.12.2 embedded x64: Python Software Foundation License and bundled notices
+  .python-runtime/LICENSE.txt
+Playwright 1.63.0: Apache-2.0 and bundled driver dependency notices
+  .python-runtime/Lib/site-packages/playwright-1.63.0.dist-info/licenses/
+  .python-runtime/Lib/site-packages/playwright/driver/package/
+greenlet 3.5.6: MIT and Python Software Foundation notices
+  .python-runtime/Lib/site-packages/greenlet-3.5.6.dist-info/
+pyee 13.0.1: MIT
+  .python-runtime/Lib/site-packages/pyee-13.0.1.dist-info/
+typing_extensions 4.16.0: Python Software Foundation License
+  .python-runtime/Lib/site-packages/typing_extensions-4.16.0.dist-info/
+Node.js 24.22.2: MIT and bundled third-party notices
+  .node-runtime/node-v24.22.2-win-x64/LICENSE
+Chromium revision 1243 and Playwright browser support tools:
+  .playwright-browsers/ (original distribution resources and notices)
+puppeteer-real-browser 1.4.4 and transitive npm dependencies:
+  node_modules/<package>/ (original license/notice files)
+  package-lock.json (exact package versions and declared licenses)
+
+Helper source provenance: AnQing1989/codexzdsh, baseline
+7be5e751dade2f91270c3f60ae003573ef8bd5e5, with local PI-Desktop modifications.
+The helper repository is private; public redistribution authorization is unconfirmed.
+Do not infer permission to publish this helper or the integrated distribution.

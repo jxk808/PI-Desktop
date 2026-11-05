@@ -20,17 +20,19 @@ test("quota manifest retains explicit host permission and original license", () 
   assert.ok(existsSync(join(custom, "subscription-quota/LICENSE")));
   assert.match(read("custom/subscription-quota/main.js"), /source: "host"/);
 });
-test("host discovers the integrated runtime without an O drive", () => {
-  const main = read("apps/desktop/electron/main/index.ts");
-  assert.ok(main.includes('join(app.getPath("home"), ".pi-desktop", "codex-automation")'));
-  assert.ok(main.includes('"custom", "auto-codex-auth"'));
-});
-test("custom installer includes quota and only allowlisted helper sources", () => {
+test("custom installer stages complete validated automation, preserving quota packaging", () => {
   const build = read("custom/build.mjs");
   assert.match(build, /to: `plugins\/\$\{manifest.id\}`/);
   assert.match(build, /to: "codex-automation"/);
-  assert.match(build, /"\*\.py", "\*\.js", "\*\.ps1"/);
-  assert.doesNotMatch(build, /filter: \["\*\*\/\*"\s*\}.*codex-automation/s);
+  assert.match(build, /assembleRuntime\(runtime, helper, automation\)/);
+  assert.doesNotMatch(build, /from: helper, to:/);
+});
+test("full build refuses missing runtime before starting toolchains", () => {
+  const env = { ...process.env };
+  delete env.PI_CUSTOM_AUTOMATION_RUNTIME;
+  const result = spawnSync(process.execPath, [join(custom, "build.mjs")], { env, encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /PI_CUSTOM_AUTOMATION_RUNTIME/);
 });
 test("helper source has no account file or generated runtime", () => {
   const files = readdirSync(join(custom, "auto-codex-auth"));

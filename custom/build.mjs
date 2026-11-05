@@ -3,6 +3,7 @@ import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync, copyFileS
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { HELPER_SOURCES, validateRuntime, assembleRuntime } from "./automation-runtime.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const desktop = join(root, "apps/desktop");
@@ -16,11 +17,18 @@ const manifest = JSON.parse(readFileSync(join(plugin, "manifest.json"), "utf8"))
 if (manifest.id !== "io.github.czp0312.subscription-quota" || !manifest.permissions.includes("models.usage")) {
   throw new Error("Unexpected quota plugin identity or permissions");
 }
-for (const name of ["codex_oauth.py", "install_playwright_chromium.py", "install_turnstile_browser.py", "turnstile_browser_bridge.js", "setup.ps1", "pyproject.toml", "package.json", "package-lock.json"]) {
+for (const name of HELPER_SOURCES) {
   if (!existsSync(join(helper, name))) throw new Error(`Missing helper source: ${name}`);
 }
 for (const name of ["main.js", "manifest.json", "LICENSE", "views/quota.html"]) {
   if (!existsSync(join(plugin, name))) throw new Error(`Missing quota source: ${name}`);
+}
+const runtime = process.env.PI_CUSTOM_AUTOMATION_RUNTIME;
+if (runtime || !args.has("--check")) {
+  const checked = validateRuntime(runtime, helper);
+  console.log(`Portable automation inventory SHA-256: ${checked.digest}`);
+} else {
+  console.log("Portable runtime not supplied; source checks only. Full builds require PI_CUSTOM_AUTOMATION_RUNTIME.");
 }
 if (args.has("--check")) {
   console.log(`Custom sources OK: core + ${manifest.id}@${manifest.version} + automation helper`);
@@ -47,13 +55,15 @@ run("pnpm.cmd", ["--filter", "@pi-desktop/desktop", "run", "build"]);
 const pkg = JSON.parse(readFileSync(join(desktop, "package.json"), "utf8"));
 const temporary = mkdtempSync(join(process.env.PI_SCRATCH_DIR || tmpdir(), "pi-custom-build-"));
 try {
+  const automation = join(temporary, "codex-automation");
+  assembleRuntime(runtime, helper, automation);
   const config = {
     ...pkg.build,
     extraMetadata: { ...pkg.build.extraMetadata, piDistribution: "installed" },
     extraResources: [
       ...(pkg.build.extraResources || []),
       { from: plugin, to: `plugins/${manifest.id}`, filter: ["**/*", "!node_modules{,/**/*}", "!tests{,/**/*}", "!package-lock.json", "!package.json"] },
-      { from: helper, to: "codex-automation", filter: ["*.py", "*.js", "*.ps1", "pyproject.toml", "package.json", "package-lock.json", "README.md"] },
+      { from: automation, to: "codex-automation", filter: ["**/*", "**/.*", "**/.*/**/*"] },
     ],
   };
   const path = join(temporary, "electron-builder.json");
