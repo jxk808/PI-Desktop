@@ -114,6 +114,7 @@ type RuntimeParams = {
   /** Opt-in TypeSafe classifier credential resolved by Electron main. */
   jevApiKey?: string;
   provider: RuntimeProviderConfig;
+  providerFallbacks?: RuntimeProviderConfig[];
   commandShell: CommandShellOption;
   pluginTools?: PluginToolDef[];
   pluginSkills?: PluginSkillDef[];
@@ -200,6 +201,13 @@ async function runtimeFor(
       providerInput?.supportsReasoning === true,
     ),
   });
+  const providerFallbacks = (params.providerFallbacks ?? []).map((candidate) => withVendorAuth(sessionId, {
+    ...candidate,
+    supportsReasoning: candidate.supportsReasoning === true,
+    supportedThinkingLevels: normalizeSupportedThinkingLevels(
+      candidate.supportedThinkingLevels, candidate.supportsReasoning === true,
+    ),
+  }));
   const thinkingLevel = normalizeThinkingLevel(params.thinkingLevel);
   const pluginTools = params.pluginTools ?? [];
   const pluginSkills = params.pluginSkills ?? [];
@@ -234,6 +242,7 @@ async function runtimeFor(
   const reusable = existing?.matches({
     mode,
     provider,
+    providerFallbacks,
     thinkingLevel,
     pluginTools,
     pluginSkills,
@@ -305,6 +314,7 @@ async function runtimeFor(
     mode,
     turnId: params.turnId,
     provider,
+    providerFallbacks,
     commandShell: params.commandShell,
     thinkingLevel,
     infiniteProviderRetry: params.infiniteProviderRetry === true,

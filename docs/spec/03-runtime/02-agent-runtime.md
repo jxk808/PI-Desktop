@@ -194,6 +194,12 @@ the provider message in both phases, so a generic 429 body still enters the
 429 budget while known non-retryable classifications remain terminal. The main
 session and builtin subagents use the same controller and policy.
 
+On the custom branch, the main session may advance to a compatible same-model
+OAuth account after exhausting that account's ten retries. The per-account
+budget, session auth allowlist and finite traversal are specified in
+[custom source migrations](custom-source-migrations.md). This does not add
+automatic model switching or change subagent fallback grants.
+
 429 retries are silent at the transcript lifecycle: no intermediate assistant
 error, lifecycle `error`, `turn_end`, `agent_end`, or duplicate assistant
 bubble reaches the UI. A normalized `status` event identifies the retry

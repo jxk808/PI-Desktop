@@ -10,6 +10,7 @@ export * from "./plugin-session-context.js";
 export * from "./one-shot-complete.js";
 export * from "./prompt-templates.js";
 export * from "./provider-headers.js";
+export { compatibleOAuthAccount } from "./provider-account-fallback.js";
 export {
   globalInstructionPath,
   loadInstructionChain,

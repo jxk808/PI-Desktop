@@ -44,6 +44,7 @@ import type { RuntimeProvider } from "./provider-catalog";
 import type { LoadedSkillDocument } from "../skill-document";
 import { getActiveRemoteHostsBoot } from "../bootstrap/remote-hosts";
 import { loadRemoteWorkspaceInstructions } from "../remote/remote-workspace-instructions.js";
+import { resolveProviderAccountFallbacks } from "./provider-account-fallbacks.js";
 
 const ErrorCodes = {
   ...SharedErrorCodes,
@@ -444,6 +445,25 @@ export function createSessionLaunchRuntime({
           storedModel?.defaultThinkingLevel,
       ),
     );
+    const runtimeProvider = {
+      id: provider.id,
+      name: provider.name,
+      vendorKey: provider.vendorKey,
+      baseUrl,
+      modelId,
+      apiKey: secret.value || "",
+      authKind: provider.authKind,
+      extensionAgentKey: provider.extensionAgentKey,
+      apiStyle,
+      ...optionalProviderHeaders(provider.headers),
+      supportsReasoning: thinkingCapabilities.supportsReasoning,
+      supportsVision: visionFromModelConfig(modelConfig),
+      supportedThinkingLevels: [...thinkingCapabilities.supportedThinkingLevels],
+      ...(modelConfig ? { modelConfig } : {}),
+    };
+    const providerFallbacks = await resolveProviderAccountFallbacks({
+      primary: runtimeProvider, providers: providers.providers, vendorOAuth, catalog: modelsDevCatalog,
+    });
     const projectPath =
       typeof session.projectPath === "string" && session.projectPath.trim()
         ? session.projectPath.trim()
@@ -702,6 +722,7 @@ export function createSessionLaunchRuntime({
       sessionId,
       [
         provider.id,
+        ...providerFallbacks.map((candidate) => candidate.id),
         ...Object.values(subagentBindings.providers).map((binding) => binding.id),
       ]
         .map((id) => providers.providers.find((row) => row.id === id))
@@ -758,22 +779,8 @@ export function createSessionLaunchRuntime({
         customSystemPrompt,
         projectInstructions,
         projectMemory,
-        provider: {
-          id: provider.id,
-          name: provider.name,
-          vendorKey: provider.vendorKey,
-          baseUrl,
-          modelId,
-          apiKey: secret.value || "",
-          authKind: provider.authKind,
-          extensionAgentKey: provider.extensionAgentKey,
-          apiStyle,
-          ...optionalProviderHeaders(provider.headers),
-          supportsReasoning: thinkingCapabilities.supportsReasoning,
-          supportsVision: visionFromModelConfig(modelConfig),
-          supportedThinkingLevels: [...thinkingCapabilities.supportedThinkingLevels],
-          ...(modelConfig ? { modelConfig } : {}),
-        },
+        provider: runtimeProvider,
+        providerFallbacks,
         pluginTools: [
           ...plugins
             .getTools()

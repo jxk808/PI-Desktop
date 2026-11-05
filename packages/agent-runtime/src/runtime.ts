@@ -1,3 +1,4 @@
+import { ProviderAccountFallback } from "./provider-account-fallback.js";
 import {
   MAX_MUTATION_RECOVERY_FAILURES, BASH_PATCH_FAILURE_KEY,
   RECOVERABLE_MUTATION_ERROR_CODES, mutationFailureKey, isPatchCommand,
@@ -985,6 +986,8 @@ export type AgentRuntimeOptions = {
   /** Durable host turn ID for the current prompt, used by plan identity. */
   turnId?: string;
   provider: RuntimeProviderConfig;
+  /** Compatible same-model OAuth accounts authorized by main for this session. */
+  providerFallbacks?: RuntimeProviderConfig[];
   thinkingLevel: SessionThinkingLevel;
   /** Persisted opt-in for retrying transient provider failures until success. */
   infiniteProviderRetry?: boolean;
@@ -1064,6 +1067,7 @@ export type AgentRuntimeDiagnostic = {
 export type RuntimeMatchConfig = {
   mode: Mode;
   provider: RuntimeProviderConfig;
+  providerFallbacks?: RuntimeProviderConfig[];
   thinkingLevel: SessionThinkingLevel;
   jevApiKey?: string;
   pluginTools?: PluginToolDef[];
@@ -1814,6 +1818,7 @@ export class DesktopAgentRuntime {
   readonly sessionId: string;
   private mode: Mode;
   private provider: RuntimeProviderConfig;
+  private readonly providerAccounts: ProviderAccountFallback;
   private thinkingLevel: SessionThinkingLevel;
   private host: RuntimeHost;
   private onEvent: (envelope: AgentEventEnvelope) => void;
@@ -2057,6 +2062,7 @@ export class DesktopAgentRuntime {
     this.mode = opts.mode;
     this.planningState = proposalKindForMode(this.mode) ? "planning" : "inactive";
     this.provider = opts.provider;
+    this.providerAccounts = new ProviderAccountFallback(opts.provider, opts.providerFallbacks);
     this.thinkingLevel = clampThinkingLevel(opts.provider, opts.thinkingLevel);
     this.infiniteProviderRetry = opts.infiniteProviderRetry === true;
     this.jevApiKey = opts.jevApiKey;
@@ -2098,7 +2104,6 @@ export class DesktopAgentRuntime {
     this.model = model;
     const models = createProviderModels(this.provider, model);
     this.models = models;
-    const runtimeApiKey = providerRequestKey(this.provider);
 
     this.transcriptHistory = [...(opts.history ?? [])];
     this.fullEntries = this.historyToEntries(this.transcriptHistory);
@@ -2303,7 +2308,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       },
       // A vendor account has no long-lived key. Leaving it unset keeps pi-ai
       // from overriding the auth the provider just resolved for this request.
-      getApiKey: async () => runtimeApiKey || undefined,
+      getApiKey: async () => providerRequestKey(this.provider) || undefined,
       // The provider's rule that a tool-call id is unique is enforced here, on
       // the last view before the wire: the request is the only place it can be
       // guaranteed for both a rebuilt context and one that grew in this process.
@@ -2699,11 +2704,12 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
 
   /** True when this runtime can be reused for a prompt with the given config. */
   matches(config: RuntimeMatchConfig): boolean {
+    const currentProvider = this.provider.extensionAgentKey ? this.provider : this.providerAccounts.initial;
     const requestedPluginTools = config.pluginTools ?? [];
     const current = safeJson([...this.pluginTools].sort((a, b) => a.name.localeCompare(b.name)));
     const next = safeJson([...requestedPluginTools].sort((a, b) => a.name.localeCompare(b.name)));
     const currentThinkingLevels = [
-      ...(this.provider.supportedThinkingLevels ?? ["off"]),
+      ...(currentProvider.supportedThinkingLevels ?? ["off"]),
     ]
       .sort()
       .join(",");
@@ -2717,20 +2723,21 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       this.provider.extensionAgentKey === config.provider.extensionAgentKey &&
       this.provider.modelId === config.provider.modelId;
     const providerMatches = extensionAgentMatches || (
-      this.provider.id === config.provider.id &&
-      this.provider.modelId === config.provider.modelId &&
-      (this.provider.baseUrl ?? "") === (config.provider.baseUrl ?? "") &&
-      this.provider.apiKey === config.provider.apiKey &&
-      this.provider.authKind === config.provider.authKind &&
-      (this.provider.apiStyle ?? "") === (config.provider.apiStyle ?? "") &&
-      providerHeadersEqual(this.provider.headers, config.provider.headers) &&
-      this.provider.supportsReasoning === config.provider.supportsReasoning &&
+      currentProvider.id === config.provider.id &&
+      currentProvider.modelId === config.provider.modelId &&
+      (currentProvider.baseUrl ?? "") === (config.provider.baseUrl ?? "") &&
+      currentProvider.apiKey === config.provider.apiKey &&
+      currentProvider.authKind === config.provider.authKind &&
+      (currentProvider.apiStyle ?? "") === (config.provider.apiStyle ?? "") &&
+      providerHeadersEqual(currentProvider.headers, config.provider.headers) &&
+      currentProvider.supportsReasoning === config.provider.supportsReasoning &&
       currentThinkingLevels === nextThinkingLevels &&
-      safeJson(this.provider.modelConfig ?? null) === safeJson(config.provider.modelConfig ?? null)
+      safeJson(currentProvider.modelConfig ?? null) === safeJson(config.provider.modelConfig ?? null)
     );
     return (
       !this.disposed &&
       providerMatches &&
+      (extensionAgentMatches || this.providerAccounts.matches(config.provider, config.providerFallbacks)) &&
       this.mode === config.mode &&
       this.jevApiKey === config.jevApiKey &&
       this.thinkingLevel ===
@@ -6456,12 +6463,16 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     if (!error.retriable || error.details?.origin === "local") return undefined;
     const infinite = this.infiniteProviderRetry;
     if (error.code === "PROVIDER_RATE_LIMITED") {
-      if (
-        !infinite &&
-        this.providerRateLimitRetryAttempt >=
-        PROVIDER_RATE_LIMIT_MAX_RETRIES
-      ) {
-        return undefined;
+      if (this.providerRateLimitRetryAttempt >= PROVIDER_RATE_LIMIT_MAX_RETRIES) {
+        const next = this.providerAccounts.next(this.provider);
+        if (next) {
+          this.provider = next;
+          // Keep the logical request model stable while re-resolving row-scoped auth.
+          this.models = createProviderModels(next, this.model);
+          this.providerRateLimitRetryAttempt = 0;
+          this.activeProviderRetryAttempt = 1;
+          return 1;
+        } else if (!infinite) return undefined;
       }
       const attempt = ++this.providerRateLimitRetryAttempt;
       this.activeProviderRetryAttempt = attempt;
@@ -6591,6 +6602,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.pendingProviderRetry = undefined;
     this.providerTransientRetryAttempt = 0;
     this.providerRateLimitRetryAttempt = 0;
+    this.providerAccounts.beginRun();
     this.providerRetryHeaders = undefined;
     this.providerFetchFailure = undefined;
     this.providerTransportHealth.reset();
