@@ -7,7 +7,7 @@
 - PI 核心：Codex 批量 OAuth、独立 Provider/邮箱标签、`models.usage` 高风险权限和宿主额度 API。
 - `custom/subscription-quota/`：本地定制插件 `0.4.3-host.1`，保留原作者 LICENSE。每个宿主 Codex 账号一张卡片；有宿主账号时禁用 CLI 重复卡片。
 - `custom/auto-codex-auth/`：自动登录助手、安装脚本及回归测试；不含账号文件或运行环境。
-- `custom/build.mjs`：Windows NSIS 统一构建，自动将插件和助手源码打入安装包。
+- `custom/build.mjs`: Windows NSIS build; bundles the quota plugin and a complete portable automation runtime.
 
 来源：PI 核心基线 `v0.22.0-beta.1`；助手源仓库 `AnQing1989/codexzdsh`，基线 `7be5e751dade2f91270c3f60ae003573ef8bd5e5` 加本地 PI 模式修改；插件来自 `czp0312/pi-desktop-quota-visualizer` 加本地修改。助手源仓库为私有仓库，未确认公开授权前不要将整合分支推到公开仓库。
 
@@ -43,34 +43,51 @@ Pop-Location
 pnpm --filter @pi-desktop/desktop typecheck
 ```
 
-## 构建完整安装包
+## Build a complete Windows x64 installer
+
+The build machine needs the normal workspace toolchains. Target machines do **not** need Python, Node, setup.ps1, a developer checkout, or runtime downloads. The installer carries `resources/codex-automation`, outside ASAR. Quota plugin `0.4.3-host.1`, its license and explicit `models.usage` permission are unchanged.
+
+Supply an explicitly prepared, approved runtime directory (see [portable runtime preparation](AUTOMATION-RUNTIME.md)); there is no developer-drive default:
 
 ```powershell
+$env:PI_CUSTOM_AUTOMATION_RUNTIME = 'C:\build-inputs\codex-automation'
+node custom/build.mjs --check
+# Optional: pin the inventory digest printed by --check after reviewing the input.
+$env:PI_CUSTOM_AUTOMATION_SHA256 = '<approved inventory SHA-256>'
 node custom/build.mjs
 ```
 
-脚本构建 workspace 依赖、Rust host core、agent runtime、Electron，并将此分支的插件和助手源码加入 NSIS。输出在 `apps/desktop/release/`。不会自动发布到官方 GitHub，也不会自动安装。
+`--check` without that environment variable checks source only, offline, and explicitly reports that no runtime was checked. With it, checks include component files, pinned dependency versions, browser revision, isolated Python configuration, license presence and a SHA-256 inventory. Full builds fail before invoking toolchains when the runtime is absent/incomplete; they never silently ship source only. Assembly additionally probes embedded Python and Node, copies only approved inputs to temporary staging, verifies every copy and writes `runtime-integrity.json`. Output remains `apps/desktop/release/`; nothing is installed or published automatically.
 
-仅当已确认现有 host core 与源码兼容时，可显式复用：
+Use `--reuse-installed-host` only after independently verifying compatibility, with `PI_CUSTOM_INSTALLED_HOST` set to the selected executable's full path.
 
-```powershell
-$env:PI_CUSTOM_INSTALLED_HOST = 'O:\PI-Desktop\resources\bin\pi-desktop-host-core.exe'
-node custom/build.mjs --reuse-installed-host
-```
-
-官方安装包不会携带这些自定义改动。请安装自己构建的版本，不要直接用官方自动更新覆盖自定义版本。这里不自动修改用户的更新偏好。
-
-## 助手部署（每台机器首次使用）
-
-安装包带的是助手源码，不包含 Python、Chromium 或 Node 的大型运行环境。安装后，用真实 Python 3.10+ 路径运行：
+The host resolves the bundled runtime relative to `process.resourcesPath` first. `PI_CODEX_AUTOMATION_ROOT` remains an explicit fallback to a **complete portable** runtime; old `.venv` launchers are not supported and must be migrated. No default HOME, account-file directory or hardcoded drive supplies executable code. Account files may live anywhere and are not copied into the runtime. `setup.ps1` remains a legacy developer convenience, not an installer deployment requirement.
 
 ```powershell
-& 'O:\PI-Desktop\resources\codex-automation\setup.ps1' -Python 'C:\path\to\python.exe'
+node --test custom/integration.test.mjs custom/automation-runtime.test.mjs apps/desktop/test/codex-batch-automation.test.mjs
+# Optional offline integration: copies the approved fixture into a Unicode/spaces path,
+# validates synthetic credentials, launches bundled Chromium locally and loads the Node bridge.
+$env:PI_TEST_AUTOMATION_ROOT = $env:PI_CUSTOM_AUTOMATION_RUNTIME
+node --test custom/automation-runtime.test.mjs
 ```
 
-脚本把白名单源码部署到 `$HOME/.pi-desktop/codex-automation`，在该目录创建独立 Python venv，安装 Playwright Chromium、独立 Node 和浏览器桥。下载需要联网，系统需具备相应运行条件。再次执行会更新助手源码并安装所需依赖，不复制账号或 Token。安装路径不同请相应调整命令。
+No live OAuth, real credentials or model calls are used by these portability tests.
 
-开发环境也可执行 `custom/auto-codex-auth/setup.ps1`。宿主依次检查环境变量 `PI_CODEX_AUTOMATION_ROOT`、用户目录、仓库内助手和兼容路径 `O:\AutoCodexAuth`。原有部署继续可用。
+## Source migration of v5-v7 patches
+
+This branch now maintains the former compiled patches as typed source:
+same-model compatible OAuth account fallback after exhausted rate-limit retry,
+complete portable automation packaging, and localized Chinese `@` subagent
+completion. See [behavior and acceptance](../docs/spec/03-runtime/custom-source-migrations.md).
+The mention menu only references installed/enabled definitions; it does not
+install the custom role definitions on another machine or bypass execution permissions.
+Account fallback does not predict remaining quota or switch to another model/vendor.
+
+Previously issued v5-v7 EXEs were compiled-resource patch builds. Migrating their
+behavior to this branch does not retroactively rebuild those artifacts or install
+the current source. A release must be rebuilt with the approved portable runtime
+and the normal Rust/JS toolchains; preserve the quota plugin's explicit permission
+confirmation and verify that source commit and installer digest together.
 
 ## 验收与发布
 

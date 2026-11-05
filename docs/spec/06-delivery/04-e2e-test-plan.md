@@ -8,6 +8,33 @@
 
 ## 1. Goals
 
+### Custom v5-v7 source migration
+
+- **Entry:** targeted source suites for account fallback, Composer subagent
+  mentions and custom installer/runtime assembly. Behavior contract:
+  [custom source migrations](../03-runtime/custom-source-migrations.md).
+- **Account sequence:** configure two compatible OAuth accounts, complete a Read
+  tool, exhaust the first account's 429 budget, recover with the second, and
+  send another prompt. Remove/disable the fallback and launch again. Repeat
+  with both accounts exhausted, authorization failure, infinite retry and Stop.
+- **Expected:** row-specific auth/usage, same model and carried tool result,
+  no duplicate tool execution, no stale auth binding, full bounded per-account
+  retries and existing terminal/cancellation behavior. No real credentials.
+- **Composer sequence:** type Chinese and English `@` queries, select an enabled
+  subagent with keyboard/pointer, finish an IME composition, dismiss with Escape,
+  select a file, switch project/session while the catalog is pending, and fail
+  the catalog request. Missing or disabled definitions must never be invented.
+- **Expected:** explicit localized invocation with stable ID, not a file chip;
+  file/slash/plugin paths remain intact and stale catalogs cannot leak scopes.
+- **Installer sequence:** assemble the allowlisted runtime, move it to a path
+  containing spaces and non-ASCII characters, clear developer overrides/system
+  Python/Node paths, validate a synthetic account file and launch local Chromium.
+  Rebuild with a missing component and verify it fails before emitting an
+  incomplete installer. Preserve bundled quota-plugin permissions and identity.
+- **Release gate:** source/component and local simulated-service checks do not
+  claim cross-machine install or real OAuth-login coverage. Validate those
+  separately before distributing a source-built release.
+
 ### E2E model discovery membership
 
 - **Entry:** `node scripts/e2e-model-discovery-state.mjs` after building Host,
