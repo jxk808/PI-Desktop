@@ -90,7 +90,9 @@ export function ComposerAutocomplete({
           ? `c:${item.command.kind}:${item.command.name}`
           : item.kind === "plugin"
             ? `pl:${item.pluginId}:${index}`
-            : `p:${item.entry.path}`,
+            : item.kind === "subagent"
+              ? `s:${item.subagent.name}`
+              : `p:${item.entry.path}`,
       type: "button" as const,
       role: "option" as const,
       "aria-selected": active,
@@ -135,6 +137,15 @@ export function ComposerAutocomplete({
         </button>
       );
     }
+    if (item.kind === "subagent") {
+      return (
+        <button {...commonProps}>
+          <span className="composer-ac-icon"><IconSparkles size={14} /></span>
+          <span className="composer-ac-name">{item.label}</span>
+          <span className="composer-ac-path">{item.subagent.name}</span>
+        </button>
+      );
+    }
     const isDir = item.entry.kind === "dir";
     const name = item.entry.path.split("/").pop() ?? item.entry.path;
     const displayName = `${name}${isDir ? "/" : ""}`;
@@ -166,6 +177,9 @@ export function ComposerAutocomplete({
           </div>,
         );
       }
+    } else if (item.kind === "subagent" && lastGroup !== "subagent") {
+      lastGroup = "subagent";
+      rows.push(<div key="g:subagent" className="composer-model-group-label">{t("chat.mentionGroupSubagents")}</div>);
     } else if (item.kind === "plugin" && lastGroup !== `plugin:${item.pluginId}`) {
       // A plugin's rows sit under its own name, after the host's.
       lastGroup = `plugin:${item.pluginId}`;
@@ -194,7 +208,7 @@ export function ComposerAutocomplete({
       menuClassName="composer-autocomplete"
       label={t(
         ac.mode === "file"
-          ? "chat.fileMenu"
+          ? "chat.mentionMenu"
           : ac.mode === "plugin"
             ? "chat.pluginTriggerMenu"
             : "chat.slashMenu",

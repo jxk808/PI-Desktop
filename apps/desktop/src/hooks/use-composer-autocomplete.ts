@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { filterSubagents, type SubagentCompletion } from "./composer-subagents";
+import { useComposerSubagents } from "./use-composer-subagents";
 import {
   applyCompletion,
   compareMatches,
@@ -38,7 +41,8 @@ const FILE_SEARCH_DEBOUNCE_MS = 150;
 
 export type AutocompleteItem =
   | { kind: "command"; command: ComposerCommand; match: FuzzyMatch }
-  | { kind: "path"; entry: FsIndexEntry; match: FuzzyMatch };
+  | { kind: "path"; entry: FsIndexEntry; match: FuzzyMatch }
+  | SubagentCompletion;
 
 /**
  * Module-level TTL cache so re-triggering stays IPC-free. The `/` command
@@ -183,6 +187,8 @@ export function useComposerAutocomplete({
   composing: boolean;
   enabled: boolean;
 }) {
+  const { t } = useTranslation();
+  const remoteScope = useAppStore((s) => JSON.stringify(s.sessions.find((session) => session.id === s.activeSessionId)?.remoteWorkspace ?? null));
   const sessionId = useAppStore((s) => s.activeSessionId);
   const remoteSession = useAppStore(activeSessionHasRemoteWorkspace);
   const workspaceKey = useAppStore((s) => s.workspace?.path ?? "");
@@ -220,6 +226,14 @@ export function useComposerAutocomplete({
   useEffect(() => {
     if (dismissedKey && triggerKey !== dismissedKey) setDismissedKey(null);
   }, [triggerKey, dismissedKey]);
+  const subagentScope = JSON.stringify([sessionId, workspaceKey, remoteScope]);
+  const subagents = useComposerSubagents(
+    trigger?.mode === "file" && !dismissed && enabled,
+    subagentScope,
+    workspaceKey,
+    remoteSession,
+  );
+
 
   // Lazy source fetch with a short TTL, keyed by workspace.
   useEffect(() => {
@@ -330,12 +344,14 @@ export function useComposerAutocomplete({
           )
         : [];
     }
-    if (!files) return [];
-    return filterFiles(
-      foundHere ? [...foundHere.entries, ...files.entries] : files.entries,
-      trigger.query,
-    );
-  }, [trigger, dismissed, commands, remoteSession, files, foundHere]);
+    return [
+      ...filterSubagents(subagents, trigger.query),
+      ...filterFiles(
+        foundHere ? [...foundHere.entries, ...(files?.entries ?? [])] : (files?.entries ?? []),
+        trigger.query,
+      ),
+    ];
+  }, [trigger, dismissed, commands, remoteSession, files, foundHere, subagents]);
 
   // New query or mode restarts keyboard navigation at the top hit.
   const itemsKey = trigger ? `${trigger.mode}:${trigger.query}` : "";
@@ -345,7 +361,7 @@ export function useComposerAutocomplete({
 
   const sourceReady =
     !!trigger &&
-    (trigger.mode === "slash" ? commands !== null : files !== null);
+    (trigger.mode === "slash" ? commands !== null : files !== null || subagents.length > 0);
   const open = !!trigger && !dismissed && sourceReady;
 
   const close = useCallback(() => {
@@ -365,6 +381,12 @@ export function useComposerAutocomplete({
       if (!trigger) return null;
       const item = items[index];
       if (!item) return null;
+      if (item.kind === "subagent") {
+        return applyCompletion(value, trigger, t("chat.subagentMentionInstruction", {
+          name: item.subagent.name,
+          label: item.label,
+        }));
+      }
       if (item.kind === "path" && item.entry.kind === "file") {
         return {
           ...applyCompletion(value, trigger, ""),
@@ -380,7 +402,7 @@ export function useComposerAutocomplete({
           : formatFileInsert(item.entry.path, item.entry.kind);
       return applyCompletion(value, trigger, insert);
     },
-    [trigger, items, value],
+    [trigger, items, value, t],
   );
 
   return {
