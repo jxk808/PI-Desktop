@@ -73,6 +73,8 @@ node --test custom/automation-runtime.test.mjs
 
 No live OAuth, real credentials or model calls are used by these portability tests.
 
+`custom/after-pack.mjs` restores the validated runtime inventory after electron-builder's resource copy, because its default filters exclude nested `node_modules`. Every restored file is checked against the staged SHA-256 manifest. Run `node --test custom/packaged-runtime.test.mjs` to cover this release-boundary regression; a generated EXE must also be extracted and checked against `runtime-integrity.json` before delivery.
+
 ## Source migration of v5-v7 patches
 
 This branch now maintains the former compiled patches as typed source:

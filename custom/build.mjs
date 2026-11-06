@@ -59,6 +59,7 @@ try {
   assembleRuntime(runtime, helper, automation);
   const config = {
     ...pkg.build,
+    afterPack: join(root, "custom/after-pack.mjs"),
     extraMetadata: { ...pkg.build.extraMetadata, piDistribution: "installed" },
     extraResources: [
       ...(pkg.build.extraResources || []),

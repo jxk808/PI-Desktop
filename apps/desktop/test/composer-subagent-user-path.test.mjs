@@ -175,7 +175,8 @@ test("real composer Chinese mentions, IME, selection, file references and stale 
 const { app, BrowserWindow } = require("electron");
 app.setPath("userData", require("node:path").join(__dirname, "profile"));
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ show: false, width: 1100, height: 850,
+  // A visible isolated window is required for requestAnimationFrame on Windows.
+  const win = new BrowserWindow({ show: true, width: 1100, height: 850,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   win.webContents.on("console-message", (_event, _level, message) => console.log(message));
   try { await win.loadFile(require("node:path").join(__dirname, "index.html"));
