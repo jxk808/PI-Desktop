@@ -35,6 +35,8 @@ test("custom workflow is manually dispatched, read-only, source-built and verifi
  assert.deepEqual(workflow.permissions, { contents: "read" });
  const job = workflow.jobs.build;
  assert.equal(job["runs-on"], "windows-latest");
+ assert.doesNotMatch(JSON.stringify(job.env), /runner\.temp/);
+ assert.match(job.steps.find(s => s.name === "Prepare isolated scratch").run, /GITHUB_ENV/);
  assert.match(job.if, /jxk808\/PI-Desktop/);
  assert.match(job.if, /refs\/heads\/custom\/main/);
  const build = job.steps.find(s => s.name === "Build full custom installer from source");

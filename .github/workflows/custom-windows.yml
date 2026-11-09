@@ -19,8 +19,6 @@ jobs:
       run:
         shell: pwsh
     env:
-      PI_SCRATCH_DIR: ${{ runner.temp }}/pi-custom
-      PI_CUSTOM_AUTOMATION_RUNTIME: ${{ runner.temp }}/pi-custom/automation-input
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       PUPPETEER_SKIP_DOWNLOAD: 'true'
     steps:
@@ -38,7 +36,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Prepare isolated scratch
-        run: New-Item -ItemType Directory -Force $env:PI_SCRATCH_DIR | Out-Null
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP 'pi-custom'
+          New-Item -ItemType Directory -Force $scratch | Out-Null
+          "PI_SCRATCH_DIR=$scratch" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PI_CUSTOM_AUTOMATION_RUNTIME=$(Join-Path $scratch 'automation-input')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install locked source dependencies
         run: pnpm install --frozen-lockfile
       - name: Prepare verified portable automation runtime
