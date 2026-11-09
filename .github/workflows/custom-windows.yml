@@ -1,0 +1,93 @@
+name: Custom Windows full installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'jxk808/PI-Desktop' && github.ref == 'refs/heads/custom/main'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PI_SCRATCH_DIR: ${{ runner.temp }}/pi-custom
+      PI_CUSTOM_AUTOMATION_RUNTIME: ${{ runner.temp }}/pi-custom/automation-input
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare isolated scratch
+        run: New-Item -ItemType Directory -Force $env:PI_SCRATCH_DIR | Out-Null
+      - name: Install locked source dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare verified portable automation runtime
+        run: node custom/prepare-runtime.mjs "$env:PI_CUSTOM_AUTOMATION_RUNTIME"
+      - name: Build JavaScript dependencies and check types
+        run: |
+          pnpm --filter '@pi-desktop/desktop^...' build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --filter @pi-desktop/desktop typecheck
+      - name: Test current Rust host source
+        run: cargo test --locked -p host-core
+      - name: Test custom interfaces and installer boundaries
+        run: |
+          node --test custom/integration.test.mjs custom/automation-runtime.test.mjs custom/packaged-runtime.test.mjs custom/prepare-runtime.test.mjs apps/desktop/test/provider-account-fallback-launch.test.mjs apps/desktop/test/codex-batch-automation.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix custom/subscription-quota ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix custom/subscription-quota test
+      - name: Test account recovery and runtime
+        working-directory: packages/agent-runtime
+        run: pnpm exec vitest run src/runtime.test.ts src/provider-account-fallback.test.ts src/provider-account-fallback-flow.test.ts src/provider-retry.test.ts src/provider-recovery-flow.test.ts --config vitest.config.ts
+      - name: Build full custom installer from source
+        run: |
+          cargo build --release --locked -p host-core
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node custom/build.mjs
+      - name: Extract and verify actual installer payload
+        run: |
+          $version = (Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json).version
+          $setup = "apps/desktop/release/PI-Desktop-Setup-$version.exe"
+          $unpack = Join-Path $env:PI_SCRATCH_DIR 'installer-extracted'
+          & 7z x $setup "-o$unpack" -y | Select-Object -Last 6
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archive = Get-ChildItem $unpack -Recurse -File -Filter app-64.7z | Select-Object -First 1
+          if (-not $archive) { throw 'Installer application payload missing' }
+          $payload = Join-Path $env:PI_SCRATCH_DIR 'verified-payload'
+          & 7z x $archive.FullName "-o$payload" -y | Select-Object -Last 6
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node custom/verify-windows-package.mjs "$payload"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PI_TEST_AUTOMATION_ROOT = Join-Path $payload 'resources/codex-automation'
+          node --test custom/automation-runtime.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- Cargo.lock pnpm-lock.yaml
+      - name: Upload verified installer and provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: custom-windows-${{ github.sha }}
+          path: dist/custom-windows/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
