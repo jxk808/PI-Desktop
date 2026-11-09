@@ -286,6 +286,12 @@ seconds (D273 / D329). In-range values, including 600 and 1800, are seconds.
   access
 - Symlinks are resolved again immediately before execution, after permission
   approval, so approval cannot skip the canonicalization step
+- Windows drive-prefix and short-name spellings identify the same local root;
+  spelling normalization does not follow links or bypass either containment check.
+- Remote workspace paths use case-sensitive POSIX component containment on every
+  Desktop OS. Relative paths resolve against the remote root; sibling-prefix and
+  traversal escapes still require approval. The paired Host revalidates actual
+  filesystem containment; remote tools never fall back to local execution.
 - Exception (D114): absolute paths inside the session scratch directory are a
   second legal root for `Read`/`Write`/`Edit` — see §4b. Both roots run the
   same lexical + symlink containment defense. `Read`/`Glob`/`Grep`/`Write`/`Edit`

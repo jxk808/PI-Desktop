@@ -212,7 +212,7 @@ fn path_repair_is_atomic_and_can_run_inside_an_import_transaction() {
     tx.rollback().unwrap();
     assert_eq!(
         db.project_path(first).unwrap().unwrap(),
-        alias.to_string_lossy().replace('\\', "/")
+        normalize_project_path(&alias.to_string_lossy()).unwrap()
     );
     let canonical = canonical_project_path(folder.to_str().unwrap()).unwrap();
     db.conn()
@@ -230,7 +230,7 @@ fn path_repair_is_atomic_and_can_run_inside_an_import_transaction() {
     assert_eq!(count, 2);
     assert_eq!(
         db.project_path(first).unwrap().unwrap(),
-        alias.to_string_lossy().replace('\\', "/")
+        normalize_project_path(&alias.to_string_lossy()).unwrap()
     );
     db.conn()
         .execute_batch("DROP TRIGGER reject_merge")

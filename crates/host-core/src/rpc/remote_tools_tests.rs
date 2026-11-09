@@ -1,5 +1,90 @@
 use super::*;
 
+#[test]
+fn remote_path_permissions_use_case_sensitive_posix_components_on_every_desktop_os() {
+    for tool in ["Read", "Glob", "Grep", "Write", "Edit"] {
+        for (path, external) in [
+            ("README.md", false),
+            ("./src/../README.md", false),
+            ("/srv/work/README.md", false),
+            ("/srv//work/./README.md", false),
+            ("../work/README.md", false),
+            ("sub/../../outside.txt", true),
+            ("../outside.txt", true),
+            ("/srv/work-other/README.md", true),
+            ("/srv/WORK/README.md", true),
+            ("/srv/work/../../etc/passwd", true),
+            ("/etc/passwd", true),
+            (r"literal\backslash.txt", false),
+        ] {
+            assert_eq!(
+                requires_external_permission(Some("/srv/work"), tool, &json!({"path":path})),
+                external,
+                "{tool} {path}"
+            );
+        }
+    }
+    assert!(!requires_external_permission(
+        Some("/"),
+        "Read",
+        &json!({"path":"../../etc/hosts"})
+    ));
+    assert!(!requires_external_permission(
+        Some("/srv/work"),
+        "Bash",
+        &json!({"path":"/etc/hosts"})
+    ));
+}
+
+#[tokio::test]
+async fn outside_remote_read_requires_local_approval_and_denial_never_dispatches() {
+    let (_dir, state, tx, mut rx) = fixture();
+    let (_path, id) = create(&state, &tx).await;
+    for (index, path) in [
+        "../outside.txt",
+        "/srv/work-other/file.txt",
+        "/srv/WORK/file.txt",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending_state = state.clone();
+        let pending_tx = tx.clone();
+        let pending_id = id.clone();
+        let pending = tokio::spawn(async move {
+            handle_request(
+                pending_state,
+                "tools.execute",
+                json!({"sessionId":pending_id,
+                "toolCallId":format!("outside-read-{index}"), "toolName":"Read", "args":{"path":path},
+                "mode":"agent"}),
+                pending_tx,
+            )
+            .await
+        });
+        let request: Value = serde_json::from_str(
+            &tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["method"], "permissions.request", "{path}");
+        assert!(state.lock().await.remote_execs.is_empty());
+        handle_request(
+            state.clone(),
+            "permissions.resolve",
+            json!({"requestId":request["params"]["requestId"], "decision":"deny"}),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending.await.unwrap().unwrap()["errorCode"], "TOOL_DENIED");
+        assert!(state.lock().await.remote_execs.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+}
+
 fn fixture() -> (
     tempfile::TempDir,
     Arc<Mutex<AppState>>,

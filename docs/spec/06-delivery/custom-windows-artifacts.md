@@ -26,3 +26,10 @@ Coverage: `custom/prepare-runtime.test.mjs`, `custom/packaged-runtime.test.mjs`,
 artifact must identify its exact Git commit and freshly compiled Host hash.
 Neither source push nor passing local script tests claims remote-build success.
 Real account login and second-machine installation remain separate acceptance.
+
+The ephemeral Windows runner sets Git `core.autocrlf=false` for nested fixture
+repositories whose tests assert LF bytes. This does not change maintainer or
+installed-client Git settings. Rust caching may retain failed-build compiler
+outputs, but never replaces source tests, release compilation or payload checks.
+The full test gate includes capability relocation/collision protection, Windows
+local path spelling and case-sensitive remote POSIX path approval regressions.

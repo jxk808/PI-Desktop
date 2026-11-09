@@ -51,3 +51,12 @@ node custom/build.mjs --check
 
 Build inputs are temporary artifacts, not repository files. The existing
 `custom/build.mjs` still owns actual packaging and quota-plugin inclusion.
+
+## Windows test environment
+
+The ephemeral runner uses `core.autocrlf=false` so test-created Git worktrees
+preserve their LF fixture bytes. This setting is never applied to the user's
+machine. A Rust cache saves compile time, including failed-job outputs; all
+tests and the current-source release build remain mandatory on every run.
+Path tests cover normalized relocated capability keys and collision refusal,
+local Windows aliases, and POSIX remote containment independent of Desktop OS.

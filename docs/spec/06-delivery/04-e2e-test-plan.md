@@ -1,5 +1,21 @@
 # 04. E2E Test Plan
 
+## E2E-WINDOWS-path-identity-and-remote-approval
+
+- Preconditions: native Windows CI with synthetic temporary data only.
+- Steps: relocate project capability overrides; reject a colliding destination
+  identity without changing the saved file. Write/Edit workspace, scratch and
+  approved external files through RPC. Exercise Windows short/verbatim root
+  spellings and remote POSIX relative, sibling, case and traversal paths.
+- Expected: relocation preserves normalized lookup keys and global overrides;
+  local aliases retain their correct roots without weakening link/traversal
+  checks. Inside remote reads relay without an outside-path prompt, while
+  outside reads require approval and denial never dispatches or runs locally.
+- Coverage: host-core data_relocation, db::project_path_tests, workspace,
+  rpc::review_rpc_tests and rpc::remote_tools tests, run by custom-windows.yml.
+- Specs: 03-runtime/03-tools-and-permissions.md; milestone: custom maintenance.
+- Status: automated native Windows CI gate; acceptance requires the full gate.
+
 ### E2E-STEERING-recovery-reply-order
 
 Feed consumed steering between an earlier reply and the next recovery response.

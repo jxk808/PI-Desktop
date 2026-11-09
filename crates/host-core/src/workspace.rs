@@ -13,15 +13,28 @@ pub(crate) fn simple_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     let canonical = path.canonicalize()?;
     #[cfg(windows)]
     {
-        let s = canonical.to_string_lossy();
-        // Strip `\\?\X:\...` → `X:\...` but keep true UNC paths like `\\?\UNC\...`
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            if rest.len() >= 3 && rest.as_bytes()[1] == b':' && rest.as_bytes()[2] == b'\\' {
-                return Ok(PathBuf::from(rest));
-            }
-        }
+        Ok(strip_windows_extended_drive_prefix(&canonical))
     }
-    Ok(canonical)
+    #[cfg(not(windows))]
+    {
+        Ok(canonical)
+    }
+}
+
+#[cfg(windows)]
+fn strip_windows_extended_drive_prefix(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::Prefix;
+
+    if matches!(path.components().next(), Some(Component::Prefix(prefix))
+        if matches!(prefix.kind(), Prefix::VerbatimDisk(_)))
+    {
+        // Only drive paths lose the prefix; verbatim UNC/device paths keep it.
+        let wide: Vec<_> = path.as_os_str().encode_wide().skip(4).collect();
+        return PathBuf::from(OsString::from_wide(&wide));
+    }
+    path.to_path_buf()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -180,6 +193,76 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
+/// Normalize containment spelling without resolving symlinks. On Windows,
+/// expand drive-path 8.3 names in the deepest accessible prefix and retain any
+/// missing tail. Canonicalizing here would admit outside links back in.
+fn normalize_containment_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let path = strip_windows_extended_drive_prefix(path);
+    let normalized = normalize_lexical(path.as_ref());
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use std::path::Prefix;
+        use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+        // Keep UNC/device semantics unchanged and avoid probing a network path
+        // before the lexical boundary has authorized it.
+        if !normalized.is_absolute()
+            || !matches!(normalized.components().next(), Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_)))
+        {
+            return normalized;
+        }
+
+        // Never let a Win32 string terminator truncate an untrusted path.
+        if normalized.as_os_str().encode_wide().any(|unit| unit == 0) {
+            return normalized;
+        }
+        let mut existing = normalized.clone();
+        let mut tail = Vec::new();
+        loop {
+            // Retain support for paths longer than MAX_PATH during lookup.
+            let wide: Vec<_> = r"\\?\"
+                .encode_utf16()
+                .chain(existing.as_os_str().encode_wide())
+                .chain(Some(0))
+                .collect();
+            // SAFETY: input is NUL-terminated; the first call only sizes output.
+            let required = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+            if required > 0 {
+                let mut buffer = vec![0; required as usize];
+                // SAFETY: output has the advertised capacity in UTF-16 units.
+                let written =
+                    unsafe { GetLongPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), required) };
+                if written > 0 && written < required {
+                    let mut expanded =
+                        PathBuf::from(OsString::from_wide(&buffer[..written as usize]));
+                    for part in tail.iter().rev() {
+                        expanded.push(part);
+                    }
+                    return strip_windows_extended_drive_prefix(&expanded);
+                }
+            }
+            // Missing/inaccessible entries (or a sizing race) must not cause
+            // canonicalization to replace our lexical containment check.
+            match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    tail.push(name.to_os_string());
+                    existing = parent.to_path_buf();
+                }
+                _ => return normalized,
+            }
+        }
+    }
+}
+
 /// Compare path components using the platform's filesystem semantics.
 /// Windows paths are case-insensitive even though `Path` comparisons are not.
 fn path_is_within(root: &Path, candidate: &Path) -> bool {
@@ -266,8 +349,9 @@ fn resolve_with_existing_ancestor(normalized: PathBuf) -> Result<PathBuf, String
 /// Resolve a user-provided path against workspace root and ensure it stays inside.
 ///
 /// Two layers of defense:
-/// 1. Lexical normalization of `.`/`..` before any check, so traversal via
-///    nonexistent parents cannot hide behind an uncanonicalizable path.
+/// 1. Lexical normalization of `.`/`..` and Windows name spelling before any
+///    check, so traversal via nonexistent parents cannot hide behind an
+///    uncanonicalizable path. Name expansion does not resolve symlinks.
 /// 2. Canonicalization of the deepest existing ancestor, so symlinks inside
 ///    the workspace cannot smuggle a target outside it.
 pub fn resolve_in_workspace(workspace_root: &Path, input: &str) -> Result<PathBuf, String> {
@@ -279,7 +363,7 @@ pub fn resolve_in_workspace(workspace_root: &Path, input: &str) -> Result<PathBu
         root.join(input)
     };
 
-    let normalized = normalize_lexical(&candidate);
+    let normalized = normalize_containment_path(&candidate);
     if !path_is_within(&root, &normalized) {
         return Err("PATH_OUTSIDE_WORKSPACE".into());
     }
@@ -376,16 +460,19 @@ pub fn resolve_tool_path_with_external(
     }
 }
 
-/// Purely lexical containment check: does `input` (absolute) normalize to a
-/// path under `root`? Used only to decide whether a scratch write can skip
-/// the permission prompt — execution still runs the full symlink-aware
-/// resolver, so a false positive here cannot escape containment.
+/// Lexical containment check (including Windows name spelling): does `input`
+/// (absolute) normalize to a path under `root`? Used to decide whether a scratch
+/// write can skip the permission prompt — execution still runs the full
+/// symlink-aware resolver, so a false positive here cannot escape containment.
 pub fn lexically_inside(root: &Path, input: &str) -> bool {
     let candidate = Path::new(input);
     if !candidate.is_absolute() {
         return false;
     }
-    path_is_within(&normalize_lexical(root), &normalize_lexical(candidate))
+    path_is_within(
+        &normalize_containment_path(root),
+        &normalize_containment_path(candidate),
+    )
 }
 
 #[cfg(test)]
@@ -625,5 +712,211 @@ mod tests {
         fs::write(root.join("a.txt"), "x").unwrap();
         let p = resolve_in_workspace(root, "a.txt").unwrap();
         assert!(p.ends_with("a.txt"));
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use super::*;
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        fn short_path(path: &Path) -> PathBuf {
+            let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            // SAFETY: input is NUL-terminated; output is sized by the first call.
+            let required = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+            assert!(required > 0, "{}", std::io::Error::last_os_error());
+            let mut buffer = vec![0; required as usize];
+            // SAFETY: the buffer holds `required` UTF-16 units.
+            let written =
+                unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), required) };
+            assert!(written > 0 && written < required);
+            let short = PathBuf::from(OsString::from_wide(&buffer[..written as usize]));
+            if short == path {
+                // Volumes may disable 8.3 creation. Still exercise real API
+                // output and verbatim/case spellings rather than skip the test.
+                eprintln!(
+                    "No short alias for {}; testing its returned spelling",
+                    path.display()
+                );
+            }
+            short
+        }
+
+        fn verbatim(path: &Path) -> PathBuf {
+            assert!(
+                matches!(path.components().next(), Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_)))
+            );
+            let mut spelling = OsString::from(r"\\?\");
+            spelling.push(path);
+            PathBuf::from(spelling)
+        }
+
+        #[test]
+        fn short_and_verbatim_workspace_paths_keep_workspace_identity() {
+            let dir = tempdir().unwrap();
+            let root = dir.path().join("Workspace long spelling");
+            fs::create_dir(&root).unwrap();
+            let root = simple_canonicalize(&root).unwrap();
+            let file = root.join("Existing long file.txt");
+            fs::write(&file, "inside").unwrap();
+            let short_root = short_path(&root);
+            let roots = [root.clone(), short_root.clone(), verbatim(&short_root)];
+            let cases = [
+                (short_path(&file), file),
+                (
+                    short_root.join(r"Missing directory\nested\new.txt"),
+                    root.join(r"Missing directory\nested\new.txt"),
+                ),
+            ];
+            for (input, expected) in cases {
+                for spelling in [
+                    input.clone(),
+                    verbatim(&input),
+                    PathBuf::from(input.to_str().unwrap().to_ascii_uppercase()),
+                ] {
+                    for workspace in &roots {
+                        assert!(lexically_inside(workspace, spelling.to_str().unwrap()));
+                        let (resolved, kind) = resolve_tool_path_with_external(
+                            workspace,
+                            &ContainedRoots::new(),
+                            spelling.to_str().unwrap(),
+                            true,
+                        )
+                        .unwrap();
+                        assert_eq!(kind, ToolRoot::Workspace, "{}", spelling.display());
+                        // The not-yet-existing tail retains the caller's case.
+                        assert!(path_is_within(&expected, &resolved));
+                        assert!(path_is_within(&resolved, &expected));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn short_and_verbatim_siblings_and_traversal_stay_outside() {
+            let dir = tempdir().unwrap();
+            let root = dir.path().join("Workspace long spelling");
+            let sibling = dir.path().join("Workspace long spelling sibling");
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&sibling).unwrap();
+            fs::write(sibling.join("exists.txt"), "outside").unwrap();
+            let root = simple_canonicalize(&root).unwrap();
+            for input in [
+                short_path(&sibling).join("exists.txt"),
+                short_path(&sibling).join("new.txt"),
+                short_path(&root).join(r"missing\..\..\outside.txt"),
+            ] {
+                for spelling in [input.clone(), verbatim(&input)] {
+                    let input = spelling.to_str().unwrap();
+                    assert!(!lexically_inside(&root, input));
+                    assert_eq!(
+                        resolve_in_workspace(&root, input).unwrap_err(),
+                        "PATH_OUTSIDE_WORKSPACE"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn short_contained_paths_keep_priority_over_enclosing_workspace() {
+            let dir = tempdir().unwrap();
+            let workspace = simple_canonicalize(dir.path()).unwrap();
+            let scratch = workspace.join("Scratch long spelling");
+            let visualization = workspace.join(r"Host data long spelling\visualizations\session1");
+            fs::create_dir(&scratch).unwrap();
+            fs::create_dir_all(&visualization).unwrap();
+            let roots =
+                scratch_roots(&scratch).with(ToolRoot::Visualization, Some(visualization.clone()));
+            for (root, kind) in [
+                (scratch, ToolRoot::Scratch),
+                (visualization, ToolRoot::Visualization),
+            ] {
+                let input = short_path(&root).join("new.html");
+                for spelling in [input.clone(), verbatim(&input)] {
+                    let input = spelling.to_str().unwrap();
+                    assert_eq!(roots.lexical_root(input).unwrap().kind, kind);
+                    let (resolved, actual) = resolve_tool_path(&workspace, &roots, input).unwrap();
+                    assert_eq!(actual, kind);
+                    assert_eq!(resolved, root.join("new.html"));
+                }
+            }
+        }
+
+        fn junction(link: &Path, target: &Path) {
+            // Like the visualization tests, use junctions: no symlink privilege
+            // is needed, and raw_arg keeps cmd's quoting intact.
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/D", "/V:OFF", "/C"])
+                .raw_arg(format!(
+                    "mklink /J \"{}\" \"{}\"",
+                    link.display(),
+                    target.display()
+                ))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "junction creation failed: {output:?}"
+            );
+        }
+
+        #[test]
+        fn spelling_expansion_does_not_admit_junctions_in_either_direction() {
+            let dir = tempdir().unwrap();
+            let base = simple_canonicalize(dir.path()).unwrap();
+            let root = base.join("Workspace long spelling");
+            let outside = base.join("Outside long spelling");
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&outside).unwrap();
+            fs::write(root.join("exists.txt"), "inside").unwrap();
+            fs::write(outside.join("exists.txt"), "outside").unwrap();
+            let outgoing = root.join("Outgoing link");
+            let incoming = outside.join("Incoming link");
+            junction(&outgoing, &outside);
+            junction(&incoming, &root);
+            for (link, lexical_inside) in [(outgoing, true), (incoming, false)] {
+                for leaf in ["exists.txt", r"missing\new.txt"] {
+                    let input = short_path(&link).join(leaf);
+                    for spelling in [input.clone(), verbatim(&input)] {
+                        let input = spelling.to_str().unwrap();
+                        assert_eq!(lexically_inside(&root, input), lexical_inside);
+                        assert_eq!(
+                            resolve_in_workspace(&root, input).unwrap_err(),
+                            "PATH_OUTSIDE_WORKSPACE"
+                        );
+                        let (_, kind) = resolve_tool_path_with_external(
+                            &root,
+                            &ContainedRoots::new(),
+                            input,
+                            true,
+                        )
+                        .unwrap();
+                        assert_eq!(kind, ToolRoot::External);
+                    }
+                }
+                fs::remove_dir(link).unwrap();
+            }
+        }
+
+        #[test]
+        fn extended_drive_normalization_keeps_unc_and_device_prefixes() {
+            assert_eq!(
+                strip_windows_extended_drive_prefix(Path::new(r"\\?\C:\workspace\file")),
+                PathBuf::from(r"C:\workspace\file")
+            );
+            for spelling in [
+                r"\\?\UNC\server\share\file",
+                r"\\server\share\file",
+                r"\\.\device",
+            ] {
+                assert_eq!(
+                    strip_windows_extended_drive_prefix(Path::new(spelling)),
+                    PathBuf::from(spelling)
+                );
+            }
+        }
     }
 }
