@@ -38,16 +38,17 @@ function Surface() {
   const [value, setValue] = React.useState("");
   const [cursor, setCursor] = React.useState(0);
   const [composing, setComposing] = React.useState(false);
+  const [agentsEnabled, setAgentsEnabled] = React.useState(false);
   const editor = React.useRef(null);
   const anchor = React.useRef(null);
   const references = React.useRef([]);
-  const completions = useComposerCompletions({ value, cursor, composing, enabled: true, referenceSessionId: "s1",
+  const completions = useComposerCompletions({ value, cursor, composing, enabled: true, agentsEnabled, referenceSessionId: "s1",
     fileReferencesRef: references,
     applyEditorDraft(text, refs, caret) { references.current = refs; setValue(text); setCursor(caret); },
     handleInput(text, caret) { setValue(text); setCursor(caret); return text; },
     invalidateComposerTransforms() {} });
   React.useLayoutEffect(() => { if (editor.current.textContent !== value) editor.current.textContent = value; }, [value]);
-  view = { value, cursor, reads, refs: references.current, ac: completions.ac };
+  view = { value, cursor, reads, refs: references.current, ac: completions.ac, setAgentsEnabled };
   return <div ref={anchor} style={{ marginTop: 400, width: 800 }}>
     <ComposerInput inputRef={editor} value={value} placeholderText="test" placeholderKey="test"
       inputBlocked={false} pasting={false} enterToSend={true} runActive={false} composerAc={completions.ac}
@@ -84,7 +85,7 @@ const select = async (name) => {
 window.mentionProbe = async () => {
   await type("@产品");
   check(options()[0]?.textContent.includes("产品合伙人") && options()[0].textContent.includes("product-partner"), "Chinese + stable ID not displayed: " + JSON.stringify(view) + document.body.innerHTML);
-  check(document.querySelector('[role="listbox"]').getAttribute("aria-label") === "文件与子智能体", "localized menu label");
+  check(document.querySelector('[role="listbox"]').getAttribute("aria-label") === i18n.t("chat.mentionMenu"), "localized menu label");
   const initialReads = reads;
   await type("@产品合伙"); check(reads === initialReads, "catalog read on keystroke");
   await key("Enter", { isComposing: true }); check(view.value === "@产品合伙" && submitted === 0, "IME Enter accepted/sent");
@@ -109,6 +110,18 @@ window.mentionProbe = async () => {
   check(view.refs.length === 1 && view.refs[0].path === "src/file.ts", "file acceptance regressed");
   check(serializeComposerFileReferences(view.value, view.refs) === "@src/file.ts", "file serialization regressed");
   await type("@src"); await select("src/"); check(view.value === "@src/", "directory completion regressed");
+  // Both completion contracts coexist when upstream's native agent chips are enabled.
+  await type("");
+  flushSync(() => view.setAgentsEnabled(true));
+  await type("@产品"); await key("Enter");
+  check(view.value === "Please ask subagent product-partner (产品合伙人) to handle:", "native agents displaced Chinese alias instruction");
+  await type("@product-partner");
+  check(view.ac.items.some(item => item.kind === "agent") && view.ac.items.some(item => item.kind === "subagent"), "missing either completion contract");
+  await select("@product-partner");
+  check(view.refs.some(ref => ref.kind === "agent" && ref.path === "product-partner"), "native agent did not become an agent chip");
+  await type("");
+  flushSync(() => view.setAgentsEnabled(false));
+  await settle();
   // In-flight old-context replies must never appear in the new workspace/session.
   await type(""); let resolveOld;
   catalog = () => new Promise(resolve => { resolveOld = resolve; });

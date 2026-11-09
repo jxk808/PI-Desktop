@@ -38,6 +38,7 @@ function fixture(options: { tool?: boolean; allLimited?: boolean; unauthorized?:
     thinkingLevel: "off", commandShell: shell,
     host: { async call<T>(method: string): Promise<T> {
       if (method === "session.appendMessage") return undefined as T;
+      if (method === "tools.fileBatchCapabilities") return { version: 1, supported: false } as T;
       if (method !== "tools.execute") throw new Error(`Unexpected host call: ${method}`);
       reads++;
       return { ok: true, content: "fixture contents" } as T;
@@ -73,6 +74,7 @@ describe("same-model account fallback through the real runtime", () => {
       expect(f.events.some(e => e.event.type === "message_end" && e.event.message.providerId === "b" && e.event.message.content === "Recovered")).toBe(true);
       expect(f.runtime.matches({ provider: f.primary, providerFallbacks: [f.fallback], mode: "agent", thinkingLevel: "off", commandShell: shell })).toBe(true);
       expect(f.runtime.matches({ provider: f.primary, providerFallbacks: [], mode: "agent", thinkingLevel: "off", commandShell: shell })).toBe(false);
+      expect(f.runtime.firstMismatch({ provider: f.primary, providerFallbacks: [], mode: "agent", thinkingLevel: "off", commandShell: shell })).toBe("providerFallbacks");
       const before = f.requests.length;
       await settle(f.runtime.prompt("Continue on the available account."));
       expect(f.requests.length).toBe(before + 1);

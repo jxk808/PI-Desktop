@@ -19,6 +19,9 @@ export const frEntries: ChangelogEntry[] = [
     version: "0.21.0",
     date: "2026-10-24",
     highlights: [
+      "Voyez le coût de chaque tour et de toute la conversation dans l’inspecteur de contexte et la capsule d’usage du tour, l’usage d’abonnement restant distinct des dépenses à l’usage.",
+      "Utilisez votre propre vidéo comme animation de démarrage : déposez-en une dans le dossier « startup » ; l’interface apparaît ensuite en fondu.",
+      "Les plugins peuvent lister les projets enregistrés et leurs dossiers sans changer de session active.",
       "Le moteur Pi 1.3.0 améliore la validation des appels d’outils et la relecture sécurisée de l’historique.",
       "Activez les visualisations intégrées facultatives dans Paramètres → IA pour afficher des cartes interactives isolées dans les conversations.",
       "Les pages du navigateur de chaque conversation restent disponibles lorsque le panneau est masqué, lors d’un changement de conversation ou d’un rechargement.",

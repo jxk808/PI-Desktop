@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -40,6 +40,8 @@ import {
 import { getGlobalDispatcher } from "undici";
 import { describeProviderFetchFailure } from "./provider-transport-recovery.js";
 import { resolveBatchExecutionMode } from "./tool-execution-policy.js";
+import { BatchPlanner } from "./batch-planner.js";
+import { DESKTOP_AGENT_IDENTITY } from "./agent-identity.js";
 /**
  * The delegate loop itself is covered in `subagent.test.ts`; here only the
  * `Task` wiring around it is under test, so `SubagentRun` is replaced by a
@@ -232,6 +234,42 @@ function runtimeTool(runtime: DesktopAgentRuntime, name: string): AgentTool {
   return tool;
 }
 
+describe("Pi 1.4 client identity", () => {
+  it("forwards the desktop identity through a user prompt to the provider adapter", async () => {
+    const runtime = createRuntime();
+    const internal = runtime as unknown as {
+      models: {
+        streamSimple: (
+          model: unknown,
+          context: { messages: AgentMessage[] },
+          options?: { identity?: unknown },
+        ) => ReturnType<typeof createAssistantMessageEventStream>;
+      };
+    };
+    const identities: unknown[] = [];
+    internal.models = {
+      streamSimple: (_model, _context, options) => {
+        identities.push(options?.identity);
+        const message = assistantMessage({ content: [{ type: "text", text: "Ready." }] }) as AssistantMessage;
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "done", reason: "stop", message });
+          stream.end(message);
+        });
+        return stream;
+      },
+    };
+
+    try {
+      await runtime.prompt("Say ready.", "identity-user", "identity-turn");
+      expect(identities).toEqual([DESKTOP_AGENT_IDENTITY]);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
 describe("ordered read preparation", () => {
   it.each([
     ["Bash", false], ["Write", false], ["Edit", false], ["Bash", true],
@@ -386,6 +424,198 @@ describe("ordered read preparation", () => {
   });
 });
 
+function toolCall(id: string, name: string, args: Record<string, unknown>) {
+  return { type: "toolCall", id, name, arguments: args };
+}
+
+/**
+ * pi stream that answers each request with the next scripted tool batch and,
+ * once the script runs out, a final text reply. Records every request.
+ */
+function scriptedStream(batches: unknown[][], requests: AgentMessage[][] = []) {
+  let turn = 0;
+  return (_model: unknown, context: { messages: AgentMessage[] }) => {
+    requests.push([...context.messages]);
+    const calls = batches[turn++];
+    const reason = calls ? "toolUse" : "stop";
+    const message = assistantMessage({
+      content: calls ?? [{ type: "text", text: "done" }],
+      stopReason: reason,
+    }) as AssistantMessage;
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => {
+      stream.push({ type: "start", partial: message });
+      stream.push({ type: "done", reason, message });
+      stream.end(message);
+    });
+    return stream;
+  };
+}
+
+/** Host whose `tools.execute` responses are held until the test releases them. */
+function gatedHost(fileBatches = false) {
+  const entered: string[] = [];
+  const release = new Map<string, (result: unknown) => void>();
+  // External Host fixture with declared virtual identities. Real filesystem
+  // identity/admission is covered by Rust and the real-Host E2E suite.
+  const tickets = new Map<string, { batch: string; id: string; name: string; path: string;
+    tree: boolean; write: boolean; submitted: boolean; done: Promise<void>; finish: () => void }>();
+  const aborted = new Set<string>();
+  let draining = false;
+  const host = {
+    call: vi.fn(async (method: string, args: any) => {
+      if (method === "project.instructions.resolve") return { entries: [] };
+      if (method === "tools.fileBatchCapabilities") return { version: 1, supported: fileBatches };
+      if (method === "tools.fileBatchRegister") {
+        const ticket = `ticket-${tickets.size}`;
+        let finish = () => {};
+        const done = new Promise<void>((resolve) => { finish = resolve; });
+        tickets.set(ticket, { batch: args.batchId, id: args.toolCallId, name: args.toolName,
+          path: String(args.args.path ?? "").replace(/^\/root\//, "").replace(/^\.\//, ""),
+          tree: ["Glob", "Grep"].includes(args.toolName) || /^(?:MV|REM)\b|@/m.test(args.args.ops ?? ""),
+          write: ["Write", "Edit"].includes(args.toolName), submitted: false, done, finish });
+        return { ticket };
+      }
+      if (method === "tools.fileBatchAbandon") {
+        const slot = tickets.get(args.ticket);
+        if (slot && !slot.submitted) slot.finish();
+        return { ok: true };
+      }
+      if (method === "tools.fileBatchClose") {
+        for (const slot of tickets.values()) if (slot.batch === args.batchId && !slot.submitted) slot.finish();
+        return { ok: true };
+      }
+      if (method === "tools.fileBatchSeal") return { ok: true };
+      if (method === "tools.abort") {
+        aborted.add(args.toolCallId);
+        const result = { ok: false, content: "TOOL_ABORTED", errorCode: "TOOL_ABORTED" };
+        release.get(args.toolCallId)?.(result);
+        for (const slot of tickets.values()) if (slot.id === args.toolCallId) slot.finish();
+        return { ok: true };
+      }
+      if (method !== "tools.execute") return undefined;
+      const slot = tickets.get(args.fileBatchTicket);
+      if (slot) {
+        slot.submitted = true;
+        const predecessors = [];
+        for (const prior of tickets.values()) {
+          if (prior === slot) break;
+          if (prior.batch === slot.batch && (prior.write || slot.write)
+            && (prior.tree || slot.tree || prior.path === slot.path)) predecessors.push(prior.done);
+        }
+        await Promise.all(predecessors);
+      }
+      if (aborted.has(args.toolCallId)) return { ok: false, content: "TOOL_ABORTED", errorCode: "TOOL_ABORTED" };
+      if (draining) return { ok: true, content: "cleanup" };
+      entered.push(args.toolCallId);
+      try { return await new Promise((resolve) => release.set(args.toolCallId, resolve)); }
+      finally { slot?.finish(); }
+    }),
+  };
+  const finish = (id: string, result: unknown = { ok: true, content: id }) => release.get(id)!(result);
+  const drain = () => {
+    draining = true;
+    for (const resolve of release.values()) resolve({ ok: true, content: "cleanup" });
+    for (const slot of tickets.values()) slot.finish();
+  };
+  return { host, entered, finish, drain };
+}
+
+function toolResults(request: AgentMessage[]) {
+  return request
+    .filter((message) => message.role === "toolResult")
+    .map((message: any) => ({
+      id: message.toolCallId as string,
+      isError: message.isError as boolean,
+      text: JSON.stringify(message.content),
+    }));
+}
+
+describe("batch turn release", () => {
+  it("releases a parent call that fails argument checks before reaching the Host", async () => {
+    const { host, entered, finish, drain } = gatedHost();
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host, projectPath: "/root" });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      // Grep without `pattern` passes the schema (the alias makes it optional)
+      // and then throws in execute; the Write is ordered behind its tree claim.
+      toolCall("grep", "Grep", { path: "src" }),
+      toolCall("write", "Write", { path: "x.txt", content: "x" }),
+    ]], requests) };
+    try {
+      const pending = runtime.prompt("Search, then write.");
+      await vi.waitFor(() => expect(entered).toEqual(["write"]));
+      finish("write");
+      await pending;
+      const results = toolResults(requests[1]);
+      expect(results.map(({ id, isError }) => [id, isError])).toEqual([["grep", true], ["write", false]]);
+      expect(results[0].text).toContain("`pattern` is required");
+    } finally {
+      drain();
+      await runtime.dispose();
+    }
+  });
+
+  it("releases a parent call rejected by the mode guard after a mid-turn mode switch", async () => {
+    const { host, entered, finish, drain } = gatedHost();
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host, projectPath: "/root" });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      toolCall("read-1", "Read", { path: "x.txt" }),
+      toolCall("write", "Write", { path: "x.txt", content: "x" }),
+      toolCall("read-2", "Read", { path: "x.txt" }),
+    ]], requests) };
+    try {
+      const pending = runtime.prompt("Read, write, read.");
+      await vi.waitFor(() => expect(entered).toEqual(["read-1"]));
+      runtime.setMode("plan");
+      finish("read-1");
+      await vi.waitFor(() => expect(entered).toEqual(["read-1", "read-2"]));
+      finish("read-2");
+      await pending;
+      const results = toolResults(requests[1]);
+      expect(results.map(({ id, isError }) => [id, isError])).toEqual([
+        ["read-1", false], ["write", true], ["read-2", false],
+      ]);
+      expect(results[1].text).toContain("not allowed in plan");
+    } finally {
+      drain();
+      await runtime.dispose();
+    }
+  });
+
+  it("releases a delegate call that fails argument checks before reaching the Host", async () => {
+    const { SubagentRun: RealSubagentRun } = await vi.importActual<typeof import("./subagent.js")>("./subagent.js");
+    const { host, entered, finish, drain } = gatedHost();
+    const writer = { name: "writer", description: "Write", tools: ["Grep", "Write"], prompt: "Write", source: "builtin" as const };
+    const runtime = createRuntime({ host, projectPath: "/root", subagents: [writer] });
+    subagentRuns.calls.length = 0;
+    try {
+      await runtimeTool(runtime, "Task").execute("task-writer", { agent: "writer", task: "Search, then write." });
+      const options = subagentRuns.calls[0];
+      const child = new RealSubagentRun({ ...options, signal: undefined }) as unknown as {
+        agent: { streamFunction: unknown };
+        run: () => Promise<{ status: string }>;
+      };
+      const requests: AgentMessage[][] = [];
+      child.agent.streamFunction = scriptedStream([[
+        toolCall("child-grep", "Grep", { path: "src" }),
+        toolCall("child-write", "Write", { path: "x.txt", content: "x" }),
+      ]], requests);
+      const running = child.run();
+      await vi.waitFor(() => expect(entered).toEqual(["child-write"]));
+      finish("child-write");
+      await expect(running).resolves.toMatchObject({ status: "completed" });
+      expect(toolResults(requests[1]).map(({ id, isError }) => [id, isError])).toEqual([
+        ["child-grep", true], ["child-write", false],
+      ]);
+    } finally {
+      drain();
+      await runtime.dispose();
+    }
+  });
+});
+
 /** Minimal pi-ai assistant message; overrides carry the shape under test. */
 function assistantMessage(overrides: {
   content: unknown[];
@@ -412,6 +642,263 @@ function assistantMessage(overrides: {
   };
 }
 
+describe("parallel file batches", () => {
+  it("owns the turn during capability negotiation and honors Stop before provider dispatch", async () => {
+    let release: (value: unknown) => void = () => {};
+    const capability = new Promise((resolve) => { release = resolve; });
+    const runtime = createRuntime({ host: { call: vi.fn((method: string) => method === "tools.fileBatchCapabilities" ? capability : Promise.resolve(undefined)) } });
+    const agent = (runtime as unknown as { agent: Agent }).agent;
+    const prompt = vi.spyOn(agent, "prompt").mockResolvedValue();
+    const pending = runtime.prompt("Wait for capabilities", undefined, "held-capability-turn");
+    expect(runtime.getStatus()).toMatchObject({ currentTurnId: "held-capability-turn", isRunning: true });
+    const stopping = runtime.abort();
+    release({ version: 1, supported: true });
+    await pending.catch(() => undefined);
+    await stopping;
+    expect(prompt).not.toHaveBeenCalled();
+    expect(runtime.getStatus().isRunning).toBe(false);
+    await runtime.dispose();
+  });
+  it.each([false, true])("keeps hard-link aliases ordered without Host identity support (write first: %s)", async (writeFirst) => {
+    const root = await mkdtemp(join(tmpdir(), "pi-batch-alias-"));
+    await writeFile(join(root, "actual.txt"), "before");
+    await link(join(root, "actual.txt"), join(root, "alias.txt"));
+    const calls = [
+      toolCall("read-alias", "Read", { path: "alias.txt" }),
+      toolCall("write-actual", "Write", { path: "actual.txt", content: "after" }),
+    ];
+    if (writeFirst) calls.reverse();
+    const batch = startBatch(calls, { projectPath: root, fileBatches: false });
+    try {
+      await vi.waitFor(() => expect(batch.entered).toContain(calls[0].id));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(batch.entered).toEqual([calls[0].id]);
+      batch.finish(calls[0].id);
+      await vi.waitFor(() => expect(batch.entered).toEqual(calls.map((call) => call.id)));
+      batch.finish(calls[1].id);
+      await batch.pending;
+    } finally {
+      await cleanup(batch);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  /** Starts a parent turn whose first request returns `calls` as one batch. */
+  function startBatch(calls: unknown[], options: { projectPath?: string; fileBatches?: boolean } = {}) {
+    const gate = gatedHost(options.fileBatches ?? true);
+    const requests: AgentMessage[][] = [];
+    const events: any[] = [];
+    const runtime = createRuntime({
+      host: gate.host,
+      projectPath: options.projectPath ?? "/root",
+      onEvent: (envelope) => { events.push((envelope as any).event); },
+    });
+    (runtime as any).models = { streamSimple: scriptedStream([calls], requests) };
+    const pending = runtime.prompt("Run the file batch.");
+    return { ...gate, runtime, requests, events, pending };
+  }
+
+  async function cleanup(batch: ReturnType<typeof startBatch>) {
+    batch.drain();
+    await batch.runtime.abort();
+    await batch.pending.catch(() => undefined);
+    await batch.runtime.dispose();
+  }
+
+  const editOps = { tag: "ABCD", ops: "PUT 1.=1:\n+x" };
+
+  it("starts [Read a, Read b, Read c, Edit d] together and keeps source-order results", async () => {
+    const batch = startBatch([
+      toolCall("read-a", "Read", { path: "a.ts" }),
+      toolCall("read-b", "Read", { path: "b.ts" }),
+      toolCall("read-c", "Read", { path: "c.ts" }),
+      toolCall("edit-d", "Edit", { path: "d.ts", ...editOps }),
+    ]);
+    try {
+      await vi.waitFor(() => expect([...batch.entered].sort()).toEqual(["edit-d", "read-a", "read-b", "read-c"]));
+      for (const id of ["edit-d", "read-c", "read-b", "read-a"]) {
+        batch.finish(id);
+        await Promise.resolve();
+      }
+      await batch.pending;
+      expect(toolResults(batch.requests[1]).map(({ id }) => id)).toEqual(["read-a", "read-b", "read-c", "edit-d"]);
+    } finally { await cleanup(batch); }
+  });
+
+  it("holds only Edit a behind Read a in [Read a, Edit a, Read b, Write c]", async () => {
+    const batch = startBatch([
+      toolCall("read-a", "Read", { path: "a.ts" }),
+      toolCall("edit-a", "Edit", { path: "a.ts", ...editOps }),
+      toolCall("read-b", "Read", { path: "b.ts" }),
+      toolCall("write-c", "Write", { path: "c.ts", content: "c" }),
+    ]);
+    try {
+      await vi.waitFor(() => expect([...batch.entered].sort()).toEqual(["read-a", "read-b", "write-c"]));
+      batch.finish("read-b");
+      batch.finish("write-c");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(batch.entered).not.toContain("edit-a");
+      batch.finish("read-a");
+      await vi.waitFor(() => expect(batch.entered.at(-1)).toBe("edit-a"));
+      batch.finish("edit-a");
+      await batch.pending;
+      expect(toolResults(batch.requests[1]).map(({ id }) => id)).toEqual(["read-a", "edit-a", "read-b", "write-c"]);
+    } finally { await cleanup(batch); }
+  });
+
+  it.each([
+    ["[Write x, Grep]", [
+      toolCall("first", "Write", { path: "x.ts", content: "x" }),
+      toolCall("second", "Grep", { pattern: "foo" }),
+    ]],
+    ["[Edit a with MV, Read b]", [
+      toolCall("first", "Edit", { path: "a.ts", tag: "ABCD", ops: "MV moved.ts" }),
+      toolCall("second", "Read", { path: "b.ts" }),
+    ]],
+    ["[Edit a with CUT @r, Edit b with PUT @r] (named register)", [
+      toolCall("first", "Edit", { path: "a.ts", tag: "ABCD", ops: "CUT 3.=5 @r" }),
+      toolCall("second", "Edit", { path: "b.ts", tag: "ABCD", ops: "PUT <1 @r" }),
+    ]],
+    ["[Read ./a.ts, Write a.ts] (Host-declared identity)", [
+      toolCall("first", "Read", { path: "./a.ts" }),
+      toolCall("second", "Write", { path: "a.ts", content: "a" }),
+    ]],
+  ] as const)("keeps %s in source order", async (_label, calls) => {
+    const batch = startBatch([...calls]);
+    try {
+      await vi.waitFor(() => expect(batch.entered).toEqual(["first"]));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(batch.entered).toEqual(["first"]);
+      batch.finish("first");
+      await vi.waitFor(() => expect(batch.entered).toEqual(["first", "second"]));
+      batch.finish("second");
+      await batch.pending;
+    } finally { await cleanup(batch); }
+  });
+
+  it("sends absolute and relative spellings to the Host without inventing file identities", async () => {
+    const register = vi.spyOn(BatchPlanner.prototype, "register");
+    const batch = startBatch([
+      toolCall("first", "Read", { path: "/root/a.ts" }),
+      toolCall("second", "Write", { path: "a.ts", content: "a" }),
+    ], { projectPath: "/root" });
+    try {
+      await vi.waitFor(() => expect(batch.entered).toEqual(["first"]));
+      expect(register.mock.calls.map(([, , call]) => call)).toMatchObject([
+        { toolName: "Read", ordinal: 0, args: { path: "/root/a.ts" } },
+        { toolName: "Write", ordinal: 1, args: { path: "a.ts" } },
+      ]);
+      batch.finish("first");
+      await vi.waitFor(() => expect(batch.entered).toEqual(["first", "second"]));
+      batch.finish("second");
+      await batch.pending;
+    } finally {
+      register.mockRestore();
+      await cleanup(batch);
+    }
+  });
+
+  it("aborts an Edit still waiting behind a running Read without reaching the Host", async () => {
+    const batch = startBatch([
+      toolCall("read-a", "Read", { path: "a.ts" }),
+      toolCall("edit-a", "Edit", { path: "a.ts", ...editOps }),
+    ]);
+    try {
+      await vi.waitFor(() => expect(batch.entered).toEqual(["read-a"]));
+      await batch.runtime.abort();
+      await batch.pending.catch(() => undefined);
+      expect(batch.entered).toEqual(["read-a"]);
+      const edit = batch.events.find((event) => event.type === "tool_end" && event.toolCallId === "edit-a");
+      expect(edit.isError).toBe(true);
+      expect(JSON.stringify(edit.result)).toContain("TOOL_ABORTED");
+    } finally { await cleanup(batch); }
+  });
+
+  it("still runs Edit a after Read a fails", async () => {
+    const batch = startBatch([
+      toolCall("read-a", "Read", { path: "a.ts" }),
+      toolCall("edit-a", "Edit", { path: "a.ts", ...editOps }),
+    ]);
+    try {
+      await vi.waitFor(() => expect(batch.entered).toEqual(["read-a"]));
+      batch.finish("read-a", { ok: false, content: "FILE_NOT_FOUND" });
+      await vi.waitFor(() => expect(batch.entered).toEqual(["read-a", "edit-a"]));
+      batch.finish("edit-a");
+      await batch.pending;
+      expect(toolResults(batch.requests[1]).map(({ id, isError }) => [id, isError])).toEqual([
+        ["read-a", true], ["edit-a", false],
+      ]);
+    } finally { await cleanup(batch); }
+  });
+
+  it("keeps a denied Write from affecting its same-batch sibling", async () => {
+    const batch = startBatch([
+      toolCall("write-a", "Write", { path: "a.ts", content: "a" }),
+      toolCall("write-b", "Write", { path: "b.ts", content: "b" }),
+    ]);
+    try {
+      // Both reach the Host before either result returns.
+      await vi.waitFor(() => expect([...batch.entered].sort()).toEqual(["write-a", "write-b"]));
+      batch.finish("write-a", { ok: false, denied: true, content: "Permission denied by the user." });
+      batch.finish("write-b");
+      await batch.pending;
+      expect(toolResults(batch.requests[1]).map(({ id, isError }) => [id, isError])).toEqual([
+        ["write-a", true], ["write-b", false],
+      ]);
+    } finally { await cleanup(batch); }
+  });
+
+  it("orders a delegate's [Read a, Edit a, Write b] without touching a concurrent parent batch", async () => {
+    const { SubagentRun: RealSubagentRun } = await vi.importActual<typeof import("./subagent.js")>("./subagent.js");
+    const writer = { name: "writer", description: "Edit", tools: ["Read", "Edit", "Write"], prompt: "Edit", source: "builtin" as const };
+    const gate = gatedHost(true);
+    const runtime = createRuntime({ host: gate.host, projectPath: "/root", subagents: [writer] });
+    (runtime as any).models = { streamSimple: scriptedStream([], []) };
+    await runtime.prompt("Initialize Host capabilities.");
+    const parentRequests: AgentMessage[][] = [];
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      toolCall("parent-read", "Read", { path: "p.ts" }),
+      toolCall("parent-write", "Write", { path: "q.ts", content: "q" }),
+    ]], parentRequests) };
+    subagentRuns.calls.length = 0;
+    let parent: Promise<unknown> | undefined;
+    try {
+      await runtimeTool(runtime, "Task").execute("task-writer", { agent: "writer", task: "Edit a." });
+      const child = new RealSubagentRun({ ...subagentRuns.calls[0], signal: undefined }) as unknown as {
+        agent: { streamFunction: unknown };
+        run: () => Promise<{ status: string }>;
+      };
+      const childRequests: AgentMessage[][] = [];
+      child.agent.streamFunction = scriptedStream([[
+        toolCall("child-read-a", "Read", { path: "a.ts" }),
+        toolCall("child-edit-a", "Edit", { path: "a.ts", ...editOps }),
+        toolCall("child-write-b", "Write", { path: "b.ts", content: "b" }),
+      ]], childRequests);
+      parent = runtime.prompt("Read and write in the parent.");
+      await vi.waitFor(() => expect([...gate.entered].sort()).toEqual(["parent-read", "parent-write"]));
+      const running = child.run();
+      await vi.waitFor(() => expect(gate.entered.slice(2).sort()).toEqual(["child-read-a", "child-write-b"]));
+      gate.finish("child-write-b");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(gate.entered).not.toContain("child-edit-a");
+      gate.finish("child-read-a");
+      // The child Edit waits only for its own batch's Read; the parent batch is still held.
+      await vi.waitFor(() => expect(gate.entered.at(-1)).toBe("child-edit-a"));
+      gate.finish("child-edit-a");
+      await expect(running).resolves.toMatchObject({ status: "completed" });
+      expect(toolResults(childRequests[1]).map(({ id }) => id)).toEqual(["child-read-a", "child-edit-a", "child-write-b"]);
+      gate.finish("parent-read");
+      gate.finish("parent-write");
+      await parent;
+      expect(toolResults(parentRequests[1]).map(({ id }) => id)).toEqual(["parent-read", "parent-write"]);
+    } finally {
+      await runtime.abort();
+      gate.drain();
+      await parent?.catch(() => undefined);
+      await runtime.dispose();
+    }
+  });
+});
+
 describe("Task/read batch execution policy", () => {
   const message = (...names: string[]) => assistantMessage({
     content: names.map((name, index) => ({
@@ -426,9 +913,13 @@ describe("Task/read batch execution policy", () => {
     [["Task", "Read"], "sequential"],
     [["Task", "Glob"], "sequential"],
     [["Task", "Grep"], "sequential"],
+    [["Task", "Write"], "sequential"],
+    [["Edit", "Task"], "sequential"],
     [["Task", "Task"], undefined],
     [["Read", "Read"], undefined],
     [["Read", "Glob", "Grep"], undefined],
+    [["Write", "Edit"], undefined],
+    [["Read", "Write"], undefined],
   ] as const)("resolves %j to %s", (names, expected) => {
     expect(resolveBatchExecutionMode(message(...names))).toBe(expected);
   });
@@ -658,6 +1149,48 @@ describe("Task/read mixed-batch safety", () => {
     }
   });
 
+  it("runs [Task, Write] one call at a time without waiting for the delegate to settle", async () => {
+    const batch = setupMixedBatch([
+      taskCall("task"),
+      { type: "toolCall", id: "write", name: "Write", arguments: { path: "notes.txt", content: "n" } },
+    ]);
+    try {
+      const pending = batch.runtime.prompt("Delegate, then write.");
+      await vi.waitFor(() => expect(batch.entered).toEqual(["write"]));
+      // Sequential: the Write was only prepared after the Task call returned.
+      expect(toolIndex(batch.events, "tool_end", "task"))
+        .toBeLessThan(toolIndex(batch.events, "tool_start", "write"));
+      // Unlike a file read, the Write does not wait for the writable delegate.
+      expect(subagentRuns.instances[0].settled).toBe(false);
+      batch.release("write")!({ ok: true, content: "written" });
+      subagentRuns.resolveRun!(settled());
+      await pending;
+    } finally {
+      await teardown(batch.runtime);
+    }
+  });
+
+  it("runs [Write, Task] one call at a time", async () => {
+    const batch = setupMixedBatch([
+      { type: "toolCall", id: "write", name: "Write", arguments: { path: "notes.txt", content: "n" } },
+      taskCall("task"),
+    ]);
+    try {
+      const pending = batch.runtime.prompt("Write, then delegate.");
+      await vi.waitFor(() => expect(batch.entered).toEqual(["write"]));
+      await Promise.resolve();
+      expect(subagentRuns.instances).toEqual([]);
+      batch.release("write")!({ ok: true, content: "written" });
+      await vi.waitFor(() => expect(subagentRuns.instances).toHaveLength(1));
+      expect(toolIndex(batch.events, "tool_end", "write"))
+        .toBeLessThan(toolIndex(batch.events, "tool_start", "task"));
+      subagentRuns.resolveRun!(settled());
+      await pending;
+    } finally {
+      await teardown(batch.runtime);
+    }
+  });
+
   it("runs a Read the model ordered first before the Task starts", async () => {
     const batch = setupMixedBatch([readCall("read"), taskCall("task")]);
     try {
@@ -758,7 +1291,52 @@ function runtimeMatches(
   });
 }
 
+function runtimeFirstMismatch(
+  runtime: DesktopAgentRuntime,
+  overrides: Partial<RuntimeMatchConfig> = {},
+): string | null {
+  return runtime.firstMismatch({
+    mode: runtime.getMode(),
+    provider: (runtime as any).provider,
+    thinkingLevel: (runtime as any).thinkingLevel,
+    pluginTools: (runtime as any).pluginTools,
+    pluginSkills: (runtime as any).pluginSkills,
+    projectInstructions: (runtime as any).baseProjectInstructions,
+    customSystemPrompt: (runtime as any).customSystemPrompt,
+    projectMemory: (runtime as any).projectMemory,
+    projectPath: (runtime as any).projectPath,
+    workspaceRoot: (runtime as any).workspaceRoot,
+    commandShell: (runtime as any).commandShell,
+    subagents: (runtime as any).subagents,
+    subagentProviders: (runtime as any).subagentProviders,
+    subagentModelKeys: [...(runtime as any).subagentModelKeys],
+    ...overrides,
+  });
+}
+
 describe("system transcript reconstruction", () => {
+  it.each(["progressTurnRerunInProgress", "silentTurnRerunInProgress", "providerRetryInProgress", "overflowRecoveryInProgress"])("starts a new recovery reply after consumed steering during %s (#1699)", async (recovery) => {
+    const onEvent = vi.fn();
+    const runtime = createRuntime({ onEvent, turnId: "active-turn" });
+    const internal = runtime as any;
+    const progress = assistantMessage({ content: [{ type: "text", text: "Checking the task" }] });
+    await internal.handleAgentEvent({ type: "message_start", message: progress });
+    const firstId = internal.currentAssistant.id;
+    const steering = { role: "user", content: "Are you stuck?", timestamp: Date.now() };
+    internal.pendingSteering.set(steering, { id: "steering-user", toolNames: [] });
+    internal[recovery] = true;
+    await internal.handleAgentEvent({ type: "message_end", message: steering });
+    const next = assistantMessage({ content: [{ type: "text", text: "No, continuing now" }] });
+    await internal.handleAgentEvent({ type: "message_start", message: next });
+    const events = onEvent.mock.calls.map(([envelope]) => (envelope as any).event);
+    const starts = events.filter(event => event.type === "message_start" && event.message.role === "assistant");
+    expect(starts).toHaveLength(2);
+    expect(starts[1].message.id).not.toBe(firstId);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "message_end", message: expect.objectContaining({ id: firstId, status: "complete" }),
+    }));
+    await runtime.dispose();
+  });
   it("keeps provider usage valid when rebuilding an unchanged prefix", async () => {
     const runtime = createRuntime();
     const internals = runtime as any;
@@ -938,6 +1516,45 @@ describe("custom system prompt files (issue #542)", () => {
     ).toBe(false);
 
     await runtime.dispose();
+  });
+});
+
+describe("DesktopAgentRuntime configuration matching", () => {
+  // #1948: a bool leaves "why did my cache reset" unanswerable. The field name
+  // is the diagnostic.
+  it("firstMismatch names the field that changed", async () => {
+    const runtime = createRuntime({ projectMemory: "Use the staging database." });
+    expect(runtimeFirstMismatch(runtime)).toBeNull();
+    expect(
+      runtimeFirstMismatch(runtime, { projectMemory: "Use the production database." }),
+    ).toBe("projectMemory");
+    expect(runtimeFirstMismatch(runtime, { mode: "plan" })).toBe("mode");
+    await runtime.dispose();
+  });
+
+  it("firstMismatch names the provider field, including a refreshed key", async () => {
+    const runtime = createRuntime();
+    const refreshedProvider = {
+      ...(runtime as any).provider,
+      apiKey: "sk-refreshed",
+    };
+    expect(runtimeFirstMismatch(runtime, { provider: refreshedProvider })).toBe(
+      "provider.apiKey",
+    );
+    const otherModel = {
+      ...(runtime as any).provider,
+      modelId: "other-model",
+    };
+    expect(runtimeFirstMismatch(runtime, { provider: otherModel })).toBe(
+      "provider.modelId",
+    );
+    await runtime.dispose();
+  });
+
+  it("a disposed runtime reports itself instead of a field", async () => {
+    const runtime = createRuntime();
+    await runtime.dispose();
+    expect(runtimeFirstMismatch(runtime)).toBe("disposed");
   });
 });
 
@@ -1385,6 +2002,164 @@ describe("DesktopAgentRuntime configuration matching", () => {
     await expect(
       agent.afterToolCall({ toolCall: { id: "patch-3" } }),
     ).resolves.toEqual({ isError: true, terminate: true });
+
+    await runtime.dispose();
+  });
+
+  it("terminates repeated failed shell patch recovery for quoted git arguments", async () => {
+    // #2016 review: a quoted option value (`-C "/tmp/my project"`) used to be
+    // split on whitespace, its tail mistaken for the subcommand, so these real
+    // patch failures bypassed the recovery budget entirely. The budget must
+    // still terminate at MAX_MUTATION_RECOVERY_FAILURES.
+    const host = {
+      call: vi.fn().mockResolvedValue({
+        ok: false,
+        isError: true,
+        errorCode: "TOOL_FAILED",
+        content: { exitCode: 128, stderr: "error: repository not found" },
+      }),
+    };
+    const runtime = createRuntime({ host });
+    const agent = (runtime as any).agent;
+    const bash = agent.state.tools.find((tool: any) => tool.name === "Bash");
+    const quotedArgs = {
+      command: 'git -C "/tmp/my project" apply --check /tmp/change.patch',
+    };
+
+    for (const [index, id] of ["quoted-patch-1", "quoted-patch-2", "quoted-patch-3"].entries()) {
+      const result = await bash.execute(id, quotedArgs);
+      const expected = index === 2 ? { isError: true, terminate: true } : { isError: true };
+      await expect(agent.afterToolCall({ toolCall: { id } })).resolves.toEqual(expected);
+      expect(result.terminate).toBe(index === 2 ? true : undefined);
+    }
+
+    await runtime.dispose();
+  });
+
+  it("never reaches the patch budget for failures of heredoc and comment text", async () => {
+    // #2016 review round two: heredoc payload lines and comments used to be
+    // classified as patch commands, so repeated ordinary failures could end
+    // the turn. The guard must not engage for them at all.
+    const host = {
+      call: vi.fn().mockResolvedValue({
+        ok: false,
+        isError: true,
+        errorCode: "TOOL_FAILED",
+        content: { exitCode: 1, stderr: "no match" },
+      }),
+    };
+    const runtime = createRuntime({ host });
+    const agent = (runtime as any).agent;
+    const bash = agent.state.tools.find((tool: any) => tool.name === "Bash");
+    const inertArgs = [
+      { command: "cat <<'EOF'\npatch notes\nEOF" },
+      { command: 'printf "%s" x # ; patch notes' },
+    ];
+    for (const [index, args] of inertArgs.entries()) {
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const id = `inert-${index}-${attempt}`;
+        const result = await bash.execute(id, args);
+        await expect(agent.afterToolCall({ toolCall: { id } })).resolves.toEqual({
+          isError: true,
+        });
+        expect(result.terminate).toBeUndefined();
+      }
+    }
+
+    await runtime.dispose();
+  });
+
+  it("never reaches the patch budget for heredoc forms that only look closed", async () => {
+    // #2016 review round three: a space-prefixed delimiter ended the body
+    // early, and a second heredoc on the opening line was swallowed as the
+    // first one's payload. In both scripts the `patch` lines are stdin, so
+    // repeated ordinary failures must not terminate the turn.
+    const host = {
+      call: vi.fn().mockResolvedValue({
+        ok: false,
+        isError: true,
+        errorCode: "TOOL_FAILED",
+        content: { exitCode: 1, stderr: "no match" },
+      }),
+    };
+    const runtime = createRuntime({ host });
+    const agent = (runtime as any).agent;
+    const bash = agent.state.tools.find((tool: any) => tool.name === "Bash");
+    const payloadOnly = [
+      { command: "cat <<'EOF'\n EOF\nordinary text\npatch notes\nEOF" },
+      { command: "cat <<A <<B\nA\nordinary text\npatch notes\nB" },
+      { command: "cat <<EOF\n\tEOF\npatch -p1 < x.diff" },
+      // Spaced and escaped redirection words name the same delimiter (#2016
+      // review round five); both bodies stay stdin.
+      { command: "cat << EOF\npatch notes\nEOF" },
+      { command: "cat <<\\EOF\npatch notes\nEOF" },
+      { command: 'cat <<""\npatch notes' },
+    ];
+    for (const [index, args] of payloadOnly.entries()) {
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const id = `looks-closed-${index}-${attempt}`;
+        const result = await bash.execute(id, args);
+        await expect(agent.afterToolCall({ toolCall: { id } })).resolves.toEqual({
+          isError: true,
+        });
+        expect(result.terminate).toBeUndefined();
+      }
+    }
+
+    await runtime.dispose();
+  });
+
+  it("terminates repeated failures of a patch on the heredoc opening line", async () => {
+    // The reverse direction: heredocs start consuming bodies only after the
+    // opening line ends, so a `git apply` on that line still counts and its
+    // repeated failures must terminate at the budget.
+    const host = {
+      call: vi.fn().mockResolvedValue({
+        ok: false,
+        isError: true,
+        errorCode: "TOOL_FAILED",
+        content: { exitCode: 128, stderr: "error: patch does not apply" },
+      }),
+    };
+    const runtime = createRuntime({ host });
+    const agent = (runtime as any).agent;
+    const bash = agent.state.tools.find((tool: any) => tool.name === "Bash");
+    const args = { command: "cat <<EOF; git apply p.diff\nbody\nEOF" };
+
+    for (const [index, id] of ["opening-patch-1", "opening-patch-2", "opening-patch-3"].entries()) {
+      const result = await bash.execute(id, args);
+      await expect(agent.afterToolCall({ toolCall: { id } })).resolves.toEqual(
+        index === 2 ? { isError: true, terminate: true } : { isError: true },
+      );
+      expect(result.terminate).toBe(index === 2 ? true : undefined);
+    }
+
+    await runtime.dispose();
+  });
+
+  it("terminates repeated failures of an empty -C git apply at the budget", async () => {
+    // The empty quoted argument occupies git's option-value slot, so this is
+    // a real patch command whose failures must still terminate the turn.
+    const host = {
+      call: vi.fn().mockResolvedValue({
+        ok: false,
+        isError: true,
+        errorCode: "TOOL_FAILED",
+        content: { exitCode: 128, stderr: "error: repository not found" },
+      }),
+    };
+    const runtime = createRuntime({ host });
+    const agent = (runtime as any).agent;
+    const bash = agent.state.tools.find((tool: any) => tool.name === "Bash");
+    const args = { command: 'git -C "" apply --check /tmp/change.patch' };
+
+    for (const [index, id] of ["empty-c-1", "empty-c-2", "empty-c-3"].entries()) {
+      const result = await bash.execute(id, args);
+      await expect(agent.afterToolCall({ toolCall: { id } })).resolves.toEqual(
+        index === 2 ? { isError: true, terminate: true } : { isError: true },
+      );
+      expect(result.terminate).toBe(index === 2 ? true : undefined);
+    }
 
     await runtime.dispose();
   });
@@ -1946,6 +2721,19 @@ describe("DesktopAgentRuntime configuration matching", () => {
     await runtime.dispose();
   });
 
+  it("keeps session scratch paths behind the shared system prefix (#1926)", async () => {
+    const first = createRuntime({ scratchDir: "/fixture/scratch/one", projectMemory: "shared memory" });
+    const second = createRuntime({ scratchDir: "/fixture/scratch/two", projectMemory: "shared memory" });
+    const firstPrompt = first as unknown as { composedSections: Record<string, string> };
+    const secondPrompt = second as unknown as { composedSections: Record<string, string> };
+    expect(firstPrompt.composedSections.runtime).toBe(secondPrompt.composedSections.runtime);
+    expect(firstPrompt.composedSections.runtime).not.toContain("/fixture/scratch/one");
+    expect(firstPrompt.composedSections.context).toContain("/fixture/scratch/one");
+    expect(secondPrompt.composedSections.context).toContain("/fixture/scratch/two");
+    await first.dispose();
+    await second.dispose();
+  });
+
   it("sends the default Bash timeout and preserves explicit overrides", async () => {
     const host = {
       call: vi.fn().mockResolvedValue({ ok: true, content: "done" }),
@@ -2254,6 +3042,114 @@ describe("DesktopAgentRuntime configuration matching", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Same 64Ki UTF-16 budget and 60/40 marker split as appendToolProgress.
+  // Kept here so the tools.output path can lock the cap without exporting it.
+  const TOOL_PROGRESS_CAP_CHARS = 64 * 1024;
+  const TOOL_PROGRESS_CAP_MARKER = "\n\n[tool output progress truncated]\n\n";
+  const LONE_SURROGATE =
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  async function flushedBashProgress(chunks: readonly string[]): Promise<string[]> {
+    vi.useFakeTimers();
+    try {
+      const listeners = new Set<(method: string, params: unknown) => void>();
+      let finishExecution!: (value: unknown) => void;
+      const execution = new Promise((resolve) => {
+        finishExecution = resolve;
+      });
+      const host = {
+        call: vi.fn((method: string) =>
+          method === "tools.execute"
+            ? execution
+            : Promise.resolve({ ok: true, content: "done" }),
+        ),
+        onNotification: vi.fn((handler: (method: string, params: unknown) => void) => {
+          listeners.add(handler);
+          return () => listeners.delete(handler);
+        }),
+      };
+      const updates: unknown[] = [];
+      const runtime = createRuntime({ host });
+      const bash = runtimeTool(runtime, "Bash");
+      const pending = bash.execute(
+        "bash-progress-cap",
+        { command: "printf progress" },
+        undefined,
+        (update: unknown) => updates.push(update),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      for (const chunk of chunks) {
+        for (const listener of listeners) {
+          listener("tools.output", {
+            sessionId: "session-1",
+            toolCallId: "bash-progress-cap",
+            commandShellId: "bash",
+            stream: "stdout",
+            chunk,
+          });
+        }
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      finishExecution({ ok: true, content: "done" });
+      await pending;
+      await runtime.dispose();
+      return updates.map((update) => (update as { content: Array<{ text: string }> }).content[0]!.text);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("bounds supplementary-plane Bash progress to the UTF-16 cap without splitting pairs", async () => {
+    const chunk = "😀".repeat(40_000);
+    expect(chunk.length).toBe(80_000);
+    const texts = await flushedBashProgress([chunk, "z"]);
+    expect(texts).toHaveLength(2);
+    for (const text of texts) {
+      expect(text.length).toBeLessThanOrEqual(TOOL_PROGRESS_CAP_CHARS);
+      expect(text).not.toMatch(LONE_SURROGATE);
+    }
+    expect(texts[0]).toContain(TOOL_PROGRESS_CAP_MARKER);
+    expect(texts[1]?.endsWith("z")).toBe(true);
+  });
+
+  it("keeps a surrogate pair whole when Bash progress truncation lands on it", async () => {
+    const marker = TOOL_PROGRESS_CAP_MARKER;
+    const remaining = TOOL_PROGRESS_CAP_CHARS - marker.length;
+    const head = Math.ceil(remaining * 0.6);
+    const tail = remaining - head;
+    // One emoji starts on the last code unit of the head budget, and another
+    // starts on the code unit just before the tail budget. A code-unit slice
+    // would keep a lone surrogate; a code-point budget leaves both out.
+    const chunk = `${"a".repeat(head - 1)}😀${"b".repeat(100)}😀${"c".repeat(tail - 1)}`;
+    const [text] = await flushedBashProgress([chunk]);
+    expect(text).toBeDefined();
+    expect(text!.length).toBeLessThanOrEqual(TOOL_PROGRESS_CAP_CHARS);
+    expect(text).not.toMatch(LONE_SURROGATE);
+    expect(text!.indexOf(marker)).toBe(head - 1);
+    expect(text!.endsWith("c".repeat(tail - 1))).toBe(true);
+    expect(text).not.toContain("😀");
+  });
+
+  it("preserves ASCII truncation and in-cap concatenation for Bash progress", async () => {
+    const marker = TOOL_PROGRESS_CAP_MARKER;
+    const remaining = TOOL_PROGRESS_CAP_CHARS - marker.length;
+    const head = Math.ceil(remaining * 0.6);
+    const tail = remaining - head;
+    const oversized = `${"H".repeat(head)}${"M".repeat(1_000)}${"T".repeat(tail)}`;
+    const [truncated] = await flushedBashProgress([oversized]);
+    const expected = `${"H".repeat(head)}${marker}${"T".repeat(tail)}`;
+    expect(truncated).toBe(expected);
+    expect(truncated?.length).toBe(TOOL_PROGRESS_CAP_CHARS);
+    expect(truncated?.indexOf(marker)).toBe(head);
+
+    const within = await flushedBashProgress(["hello ", "😀世界"]);
+    expect(within).toEqual(["hello ", "hello 😀世界"]);
+
+    const exact = "e".repeat(TOOL_PROGRESS_CAP_CHARS);
+    const [atCap] = await flushedBashProgress([exact]);
+    expect(atCap).toBe(exact);
   });
 
   it("removes streamed-output resources when the host dies or runtime is disposed", async () => {
@@ -2962,8 +3858,11 @@ describe("DesktopAgentRuntime deferred tool catalog", () => {
       "Grep",
       "asktool",
       "Skill",
+      // Goal runs as a staged mode the user selects; EnterGoalMode is gone.
       "EnterPlanMode",
-      "EnterGoalMode",
+      "TaskWait",
+      "TaskList",
+      "TaskStop",
       "new_context",
       "ToolSearch",
     ]);
@@ -3333,7 +4232,10 @@ describe("DesktopAgentRuntime mode and tool composition", () => {
     await runtime.dispose();
   });
 
-  it("gives Goal mode the read-only core, guarded editing declarations, and SubmitGoal", async () => {
+  it("keeps a Goal session without a definition read-only and offers no legacy Goal negotiation", async () => {
+    // ADR mode-definitions: Goal is a staged mode. A session that carries no
+    // Goal definition (legacy negotiation sessions) falls back to the
+    // builtin mapping, which is the contract level, and SubmitGoal is gone.
     const runtime = createRuntime({
       mode: "goal",
       pluginTools: [
@@ -3354,16 +4256,19 @@ describe("DesktopAgentRuntime mode and tool composition", () => {
         "Grep",
         "BrowserPreview",
         "Bash",
-        "SubmitGoal",
       ]),
     );
     expect(goalTools).toEqual(expect.arrayContaining(["Write", "Edit"]));
     expect(goalTools).not.toContain("plugin_demo_run");
     expect(goalTools).not.toContain("SubmitPlan");
+    expect(goalTools).not.toContain("SubmitGoal");
     expect(goalTools).not.toContain("EnterGoalMode");
-    expect(runtime.getStatus().planningState).toBe("planning");
-    expect(agent.state.systemPrompt).toContain("SubmitGoal");
-    expect(agent.state.systemPrompt).toContain("acceptance criteria");
+    expect(goalTools).not.toContain("CompleteStage");
+    expect(runtime.getStatus().planningState).toBe("inactive");
+    expect(agent.state.systemPrompt).not.toContain("SubmitGoal");
+    expect(agent.state.systemPrompt).toContain("Do not use Write, Edit");
+    await expect(runtimeTool(runtime, "Write").execute("w1", { path: "a.txt", content: "x" }))
+      .rejects.toThrow("not allowed in goal mode");
 
     await runtime.dispose();
   });
@@ -3475,7 +4380,8 @@ describe("DesktopAgentRuntime tool schema completeness (#864)", () => {
 });
 
 describe("DesktopAgentRuntime plan transitions", () => {
-  it.each(["plan", "goal"] as const)(
+  // Goal no longer submits a contract (ADR mode-definitions); only Plan does.
+  it.each(["plan"] as const)(
     "continues the %s user turn after a missing-workspace submission",
     async (kind) => {
       const host = {
@@ -3684,68 +4590,33 @@ describe("DesktopAgentRuntime plan transitions", () => {
     await runtime.dispose();
   });
 
-  it("routes the Goal contract through the same host approval with kind goal", async () => {
+  it("denies the retired Goal negotiation tools from older transcripts", async () => {
+    // ADR mode-definitions: Goal is a staged mode the user selects. Neither
+    // EnterGoalMode nor SubmitGoal is offered, and a call replayed from an
+    // older transcript is denied without reaching the Host.
     const host = { call: vi.fn() };
     const runtime = createRuntime({ host, turnId: "turn-1" });
     const agent = (runtime as any).agent;
-
-    host.call.mockResolvedValueOnce({ ok: true, state: "planning" });
-    const enterTool = agent.state.tools.find(
-      (tool: any) => tool.name === "EnterGoalMode",
-    );
-    await enterTool.execute("enter-goal-call", {});
-    expect(runtime.getMode()).toBe("goal");
-    expect(host.call).toHaveBeenNthCalledWith(1, "plans.enter", {
-      sessionId: "session-1",
-      turnId: "turn-1",
-      toolCallId: "enter-goal-call",
-      kind: "goal",
-    });
-
-    const markdown = "# Goal\n\nCheckout works.\n\n## Acceptance criteria\n- tests pass\n";
-    const proposal = {
-      id: "proposal-goal-1",
-      sessionId: "session-1",
-      turnId: "durable-turn-1",
-      toolCallId: "submit-goal-call",
-      kind: "goal",
-      title: "Checkout works",
-      markdown,
-      plan: markdown,
-      question: "Approve this goal?",
-      artifact: {
-        relativePath: ".pi/goal/proposal-goal-1.md",
-        sha256: "def456",
-        sizeBytes: 42,
-      },
-      version: 1,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    host.call.mockResolvedValueOnce({ status: "pending", proposal });
-    const submitTool = agent.state.tools.find(
-      (tool: any) => tool.name === "SubmitGoal",
-    );
-    expect(submitTool.description).toContain("acceptance criteria");
-    const submitResult = await submitTool.execute("submit-goal-call", {
-      title: proposal.title,
-      markdown: proposal.markdown,
-      question: proposal.question,
-    });
-
-    expect(submitResult.terminate).toBe(true);
-    expect(runtime.getMode()).toBe("goal");
-    expect(runtime.getStatus().planningState).toBe("awaiting_approval");
-    expect(host.call).toHaveBeenLastCalledWith(
-      "plans.submit",
-      expect.objectContaining({
-        sessionId: "session-1",
-        toolCallId: "submit-goal-call",
-        kind: "goal",
-        markdown: proposal.markdown,
-      }),
-    );
+    const names = agent.state.tools.map((tool: any) => tool.name);
+    expect(names).toContain("EnterPlanMode");
+    expect(names).not.toContain("EnterGoalMode");
+    expect(names).not.toContain("SubmitGoal");
+    const beforeToolCall = agent.beforeToolCall as Function;
+    for (const name of ["EnterGoalMode", "SubmitGoal"]) {
+      await expect(
+        beforeToolCall({
+          assistantMessage: { content: [{ type: "toolCall", id: "g1", name, arguments: {} }] },
+          toolCall: { id: "g1", name, arguments: {} },
+          args: {},
+          context: {},
+        }),
+      ).resolves.toMatchObject({
+        block: true,
+        reason: expect.stringContaining(`${name} is no longer available`),
+      });
+    }
+    expect(host.call).not.toHaveBeenCalled();
+    expect(runtime.getMode()).toBe("agent");
 
     await runtime.dispose();
   });
@@ -4542,6 +5413,52 @@ describe("DesktopAgentRuntime thinking configuration", () => {
         thinkingSignature: "reasoning_content",
       },
       { type: "text", text: "answer" },
+    ]);
+
+    await runtime.dispose();
+  });
+
+  it("does not replay an echoed reasoning placeholder as the model's own thinking (#1945)", async () => {
+    const runtime = createRuntime({
+      provider: {
+        ...provider,
+        vendorKey: "deepseek",
+        baseUrl: "https://relay.example/v1",
+        modelId: "deepseek-v4",
+        modelConfig: {
+          ...provider.modelConfig!,
+          baseUrl: "https://relay.example/v1",
+        },
+      },
+      history: [
+        {
+          id: "assistant-echo-only",
+          role: "assistant",
+          content: "first answer",
+          thinking: "[reasoning not retained for this turn]",
+          createdAt: new Date().toISOString(),
+          status: "complete",
+        },
+        {
+          id: "assistant-echo-prefix",
+          role: "assistant",
+          content: "second answer",
+          thinking: "[reasoning not retained for this turn]real plan",
+          createdAt: new Date().toISOString(),
+          status: "complete",
+        },
+      ],
+    });
+    const assistants = (runtime as any).agent.state.messages.filter(
+      (message: any) => message.role === "assistant",
+    );
+
+    expect(assistants.map((message: any) => message.content)).toEqual([
+      [{ type: "text", text: "first answer" }],
+      [
+        { type: "thinking", thinking: "real plan", thinkingSignature: "reasoning_content" },
+        { type: "text", text: "second answer" },
+      ],
     ]);
 
     await runtime.dispose();
@@ -6531,6 +7448,31 @@ describe("DesktopAgentRuntime response duration", () => {
     }
   });
 
+  it.each([
+    ["router/auto", "vendor/served-model", "vendor/served-model"],
+    ["router/auto", undefined, undefined],
+  ])("records the concrete served model on the finished turn (%s -> %s)", async (requested, served, expected) => {
+    const onEvent = vi.fn();
+    const runtime = createRuntime({ onEvent });
+    const internals = runtime as unknown as {
+      handleAgentEvent(event: unknown): Promise<void>;
+      provider: { modelId: string };
+    };
+    internals.provider = { ...internals.provider, modelId: requested };
+    await internals.handleAgentEvent({ type: "message_start", message: { role: "assistant", content: [] } });
+    await internals.handleAgentEvent({
+      type: "message_end",
+      message: { ...assistantMessage({ content: [{ type: "text", text: "answer" }] }), ...(served ? { responseModel: served } : {}) },
+    });
+    const terminal = onEvent.mock.calls
+      .map(([envelope]) => envelope as any)
+      .find(({ event }) => event.type === "message_end")?.event.message;
+    expect(terminal).toMatchObject({ modelId: requested, status: "complete" });
+    if (expected) expect(terminal.responseModelId).toBe(expected);
+    else expect(terminal).not.toHaveProperty("responseModelId");
+    await runtime.dispose();
+  });
+
   it("accumulates request and stream timing across a provider retry", async () => {
     vi.useFakeTimers();
     try {
@@ -7224,6 +8166,300 @@ describe("DesktopAgentRuntime per-turn context protection", () => {
           : [],
       ),
     ).toEqual([]);
+    await runtime.dispose();
+  });
+
+  /**
+   * Read of `src/a.ts`, then Edit of `src/b.ts`, then a trailing user message.
+   * A large `keepRecentTokens` parks the calls in pi's retained tail; a tiny
+   * one leaves them in `messagesToSummarize`. Codex folds both ranges into the
+   * summary, so the file lists have to agree.
+   */
+  function recentFileOperationEntries() {
+    const readAssistant = {
+      ...assistant,
+      content: [
+        {
+          type: "toolCall" as const,
+          id: "read-a",
+          name: "Read",
+          arguments: { path: "src/a.ts" },
+        },
+      ],
+      stopReason: "toolUse" as const,
+    };
+    const readResult = {
+      ...toolResult,
+      toolCallId: "read-a",
+      toolName: "Read",
+      content: [{ type: "text" as const, text: "contents of a" }],
+    };
+    const editAssistant = {
+      ...assistant,
+      timestamp: 3,
+      content: [
+        {
+          type: "toolCall" as const,
+          id: "edit-b",
+          name: "Edit",
+          arguments: { path: "src/b.ts" },
+        },
+      ],
+      stopReason: "toolUse" as const,
+    };
+    const editResult = {
+      ...toolResult,
+      toolCallId: "edit-b",
+      toolName: "Edit",
+      timestamp: 4,
+      content: [{ type: "text" as const, text: "edited b" }],
+    };
+    return [
+      {
+        type: "message",
+        id: "user-1",
+        seq: 0,
+        parentId: null,
+        timestamp: Date.parse("2026-07-28T00:00:00Z"),
+        message: { role: "user", content: "update the files", timestamp: 1 },
+      },
+      {
+        type: "message",
+        id: "read-assistant",
+        seq: 1,
+        parentId: "user-1",
+        timestamp: Date.parse("2026-07-28T00:00:01Z"),
+        message: readAssistant,
+      },
+      {
+        type: "message",
+        id: "read-a",
+        seq: 2,
+        parentId: "read-assistant",
+        timestamp: Date.parse("2026-07-28T00:00:02Z"),
+        message: readResult,
+      },
+      {
+        type: "message",
+        id: "edit-assistant",
+        seq: 3,
+        parentId: "read-a",
+        timestamp: Date.parse("2026-07-28T00:00:03Z"),
+        message: editAssistant,
+      },
+      {
+        type: "message",
+        id: "edit-b",
+        seq: 4,
+        parentId: "edit-assistant",
+        timestamp: Date.parse("2026-07-28T00:00:04Z"),
+        message: editResult,
+      },
+      {
+        type: "message",
+        id: "user-next",
+        seq: 5,
+        parentId: "edit-b",
+        timestamp: Date.parse("2026-07-28T00:00:05Z"),
+        message: { role: "user", content: "next", timestamp: 5 },
+      },
+    ];
+  }
+
+  function summarizedToolCalls(messages: any[]) {
+    return messages.flatMap((message) =>
+      Array.isArray(message.content)
+        ? message.content
+            .filter((block: any) => block.type === "toolCall")
+            .map((block: any) => ({ name: block.name, path: block.arguments.path }))
+        : [],
+    );
+  }
+
+  function prepareRecentFileOperations(
+    runtime: DesktopAgentRuntime,
+    keepRecentTokens: number,
+  ) {
+    (runtime as any).fullEntries = recentFileOperationEntries();
+    const entries = (runtime as any).entriesWithCompaction();
+    const budget = (runtime as any).contextBudget(
+      entries.map((entry: any) => entry.message),
+    );
+    return (runtime as any).prepareCompactionInput(
+      entries,
+      { ...budget, keepRecentTokens },
+      20_000,
+      "completed_turn",
+    );
+  }
+
+  it("records file operations from tool calls folded out of the retained tail", async () => {
+    const runtime = createRuntime();
+    // Larger than the whole history, so pi leaves the Read/Edit calls in
+    // `retainedTail`. The shaped preparation still summarizes them.
+    const preparation = prepareRecentFileOperations(runtime, 1_000_000);
+
+    expect(preparation.ok).toBe(true);
+    expect(summarizedToolCalls(preparation.value.messagesToSummarize)).toEqual([
+      { name: "read", path: "src/a.ts" },
+      { name: "edit", path: "src/b.ts" },
+    ]);
+    expect([...preparation.value.fileOps.read]).toEqual(["src/a.ts"]);
+    expect([...preparation.value.fileOps.edited]).toEqual(["src/b.ts"]);
+    expect([...preparation.value.fileOps.written]).toEqual([]);
+
+    (runtime as any).models = {
+      completeSimple: async () =>
+        assistantMessage({ content: [{ type: "text", text: "Older work." }] }),
+    };
+    const summary = await (runtime as any).generateCompaction(
+      preparation.value,
+      new AbortController().signal,
+    );
+    expect(summary.ok).toBe(true);
+    expect(summary.value.summary).toContain(
+      "<modified-files>\nsrc/b.ts\n</modified-files>",
+    );
+    expect(summary.value.details.modifiedFiles).toEqual(["src/b.ts"]);
+    await runtime.dispose();
+  });
+
+  it("does not duplicate file operations already collected before the fold", async () => {
+    const runtime = createRuntime();
+    // The trailing user message is the only thing that fits, so the calls stay
+    // in pi's `messagesToSummarize` and are collected before the fold.
+    const preparation = prepareRecentFileOperations(runtime, 1);
+
+    expect(preparation.ok).toBe(true);
+    expect(summarizedToolCalls(preparation.value.messagesToSummarize)).toEqual([
+      { name: "read", path: "src/a.ts" },
+      { name: "edit", path: "src/b.ts" },
+    ]);
+    expect([...preparation.value.fileOps.read]).toEqual(["src/a.ts"]);
+    expect([...preparation.value.fileOps.edited]).toEqual(["src/b.ts"]);
+    expect([...preparation.value.fileOps.written]).toEqual([]);
+    expect(preparation.value.fileOps.read.size).toBe(1);
+    expect(preparation.value.fileOps.edited.size).toBe(1);
+    await runtime.dispose();
+  });
+
+  it("records aliased path arguments on the checkpoint file lists", async () => {
+    const runtime = createRuntime();
+    const readAssistant = {
+      ...assistant,
+      content: [
+        {
+          type: "toolCall" as const,
+          id: "read-a",
+          name: "Read",
+          arguments: { file_path: "src/a.txt" },
+        },
+      ],
+      stopReason: "toolUse" as const,
+    };
+    const editAssistant = {
+      ...assistant,
+      timestamp: 3,
+      content: [
+        {
+          type: "toolCall" as const,
+          id: "edit-b",
+          name: "Edit",
+          arguments: { filepath: "src/b.ts" },
+        },
+      ],
+      stopReason: "toolUse" as const,
+    };
+    const writeAssistant = {
+      ...assistant,
+      timestamp: 5,
+      content: [
+        {
+          type: "toolCall" as const,
+          id: "write-c",
+          name: "Write",
+          arguments: { file: "src/c.ts" },
+        },
+      ],
+      stopReason: "toolUse" as const,
+    };
+    (runtime as any).fullEntries = [
+      {
+        type: "message",
+        id: "user-1",
+        seq: 0,
+        parentId: null,
+        timestamp: Date.parse("2026-07-28T00:00:00Z"),
+        message: { role: "user", content: "update the files", timestamp: 1 },
+      },
+      {
+        type: "message",
+        id: "read-assistant",
+        seq: 1,
+        parentId: "user-1",
+        timestamp: Date.parse("2026-07-28T00:00:01Z"),
+        message: readAssistant,
+      },
+      {
+        type: "message",
+        id: "edit-assistant",
+        seq: 2,
+        parentId: "read-assistant",
+        timestamp: Date.parse("2026-07-28T00:00:03Z"),
+        message: editAssistant,
+      },
+      {
+        type: "message",
+        id: "write-assistant",
+        seq: 3,
+        parentId: "edit-assistant",
+        timestamp: Date.parse("2026-07-28T00:00:05Z"),
+        message: writeAssistant,
+      },
+      {
+        type: "message",
+        id: "user-next",
+        seq: 4,
+        parentId: "write-assistant",
+        timestamp: Date.parse("2026-07-28T00:00:06Z"),
+        message: { role: "user", content: "next", timestamp: 6 },
+      },
+    ];
+    const entries = (runtime as any).entriesWithCompaction();
+    const budget = (runtime as any).contextBudget(
+      entries.map((entry: any) => entry.message),
+    );
+    // Larger than the history, so the calls sit in pi's retained tail and the
+    // shaped preparation is what records them.
+    const preparation = (runtime as any).prepareCompactionInput(
+      entries,
+      { ...budget, keepRecentTokens: 1_000_000 },
+      20_000,
+      "completed_turn",
+    );
+
+    expect(preparation.ok).toBe(true);
+    expect([...preparation.value.fileOps.read]).toEqual(["src/a.txt"]);
+    expect([...preparation.value.fileOps.edited]).toEqual(["src/b.ts"]);
+    expect([...preparation.value.fileOps.written]).toEqual(["src/c.ts"]);
+
+    (runtime as any).models = {
+      completeSimple: async () =>
+        assistantMessage({ content: [{ type: "text", text: "Older work." }] }),
+    };
+    const summary = await (runtime as any).generateCompaction(
+      preparation.value,
+      new AbortController().signal,
+    );
+    expect(summary.ok).toBe(true);
+    expect(summary.value.details.readFiles).toEqual(["src/a.txt"]);
+    expect(summary.value.details.modifiedFiles).toEqual(["src/b.ts", "src/c.ts"]);
+    expect(summary.value.summary).toContain(
+      "<read-files>\nsrc/a.txt\n</read-files>",
+    );
+    expect(summary.value.summary).toContain(
+      "<modified-files>\nsrc/b.ts\nsrc/c.ts\n</modified-files>",
+    );
     await runtime.dispose();
   });
 
@@ -8135,6 +9371,8 @@ describe("DesktopAgentRuntime inline context compaction", () => {
         compaction: expect.objectContaining({
           summary: SUMMARY,
           throughMessageId: "recent-user",
+          // The compacted request estimate survives a reload (#2015).
+          details: expect.objectContaining({ contextTokens: 40_000 }),
         }),
       }),
     );
@@ -8150,7 +9388,10 @@ describe("DesktopAgentRuntime inline context compaction", () => {
           throughMessageId: "recent-user",
           generation: 1,
           summaryTokens: 7,
+          contextTokens: 40_000,
           summarized: true,
+          providerId: "local",
+          modelId: "local-model",
         },
       }),
     );
@@ -8655,7 +9896,10 @@ describe("DesktopAgentRuntime subagents", () => {
     try {
       await taskTool(runtime).execute("granted", { agent: "explorer", task: "Search.", model: "new/new-model" });
       expect(subagentRuns.calls).toHaveLength(1);
-      host.call.mockRejectedValue(new Error("model is not enabled for delegation"));
+      host.call.mockImplementation(async (method: string) => {
+        if (method === "provider.resolveSubagentModel") throw new Error("model is not enabled for delegation");
+        return undefined;
+      });
       expect(runtimeMatches(runtime)).toBe(true);
       await runtime.prompt("Search again.");
       const denied = await taskTool(runtime).execute("revoked", { agent: "explorer", task: "Search.", model: "new/new-model" });
@@ -8667,7 +9911,8 @@ describe("DesktopAgentRuntime subagents", () => {
 
   it("discards an on-demand grant returned after its prompt ended (#841)", async () => {
     let resolveGrant: (value: RuntimeProviderConfig) => void = () => {};
-    const host = { call: vi.fn().mockImplementation(() => new Promise<RuntimeProviderConfig>((resolve) => { resolveGrant = resolve; })) };
+    const host = { call: vi.fn().mockImplementation((method: string) => method === "provider.resolveSubagentModel"
+      ? new Promise<RuntimeProviderConfig>((resolve) => { resolveGrant = resolve; }) : Promise.resolve(undefined)) };
     const runtime = createRuntime({ subagents: [explorer], host });
     const agent = (runtime as unknown as { agent: Agent }).agent;
     vi.spyOn(agent, "prompt").mockResolvedValue();
@@ -8687,7 +9932,7 @@ describe("DesktopAgentRuntime subagents", () => {
     } finally { await runtime.dispose(); }
   });
 
-  it("allows only Task and read/search tools to run in parallel", async () => {
+  it("keeps Write/Edit sequential until Host file batch support is negotiated", async () => {
     const runtime = createRuntime({ subagents: [explorer] });
     const catalog = (runtime as any).toolCatalog as Map<string, any>;
 
@@ -9036,6 +10281,184 @@ describe("DesktopAgentRuntime subagents", () => {
       }
     },
   );
+
+  it("waits for a steered Bash call to settle before requesting the next model response", async () => {
+    let finish!: (value: unknown) => void;
+    const host = { call: vi.fn((method: string) => {
+      if (method === "tools.execute") return new Promise((resolve) => { finish = resolve; });
+      return Promise.resolve({ ok: true });
+    }) };
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host });
+    (runtime as any).models = { streamSimple: scriptedStream([
+      [{ type: "toolCall", id: "long-bash", name: "Bash", arguments: { command: "sleep 600" } }],
+    ], requests) };
+    const running = runtime.prompt("Run the command", "initial-user", "active-turn");
+    try {
+      await vi.waitFor(() => expect(finish).toBeDefined());
+      runtime.steer({ text: "Change direction" }, "active-turn", {
+        id: "steer-user", role: "user", content: "Change direction", createdAt: new Date().toISOString(), steering: true,
+      });
+      await vi.waitFor(() => expect(host.call).toHaveBeenCalledWith("tools.abort", expect.objectContaining({ toolCallId: "long-bash" })));
+      runtime.steer({ text: "Another constraint" }, "active-turn", {
+        id: "steer-user-2", role: "user", content: "Another constraint", createdAt: new Date().toISOString(), steering: true,
+      });
+      expect(host.call.mock.calls.filter(([method]) => method === "tools.abort")).toHaveLength(1);
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(requests).toHaveLength(1);
+      finish({ ok: false, content: "Interrupted", errorCode: "TOOL_ABORTED" });
+      vi.useRealTimers();
+      await running;
+      expect(requests).toHaveLength(2);
+      expect(JSON.stringify(requests[1])).toContain("Change direction");
+      expect(requests[1].filter((message) => message.role === "user" && JSON.stringify(message.content).includes("Another constraint"))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      finish?.({ ok: false, content: "Stopped" });
+      await runtime.abort();
+      await running;
+      await runtime.dispose();
+    }
+  });
+
+  it.each(["remote", "background"] as const)("does not cancel a %s command on steering", async (kind) => {
+    let finish!: (value: unknown) => void;
+    const host = { call: vi.fn((method: string) => method === "tools.execute"
+      ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ok: true })) };
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host, ...(kind === "remote" ? { remoteWorkspace: { hostKey: "ssh", path: "/remote" } } : {}) });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      { type: "toolCall", id: "keep-running", name: "Bash", arguments: { command: "sleep 600", ...(kind === "background" ? { runInBackground: true } : {}) } },
+    ]], requests) };
+    const running = runtime.prompt("Run command", "initial-user", "active-turn");
+    try {
+      await vi.waitFor(() => expect(finish).toBeDefined());
+      runtime.steer({ text: "Change direction" }, "active-turn", {
+        id: "steer-user", role: "user", content: "Change direction", createdAt: new Date().toISOString(), steering: true,
+      });
+      expect(host.call.mock.calls.some(([method]) => method === "tools.abort")).toBe(false);
+      expect(runtime.getStatus().activity?.phase).toBe("waiting-tool-stop");
+      expect(requests).toHaveLength(1);
+      finish({ ok: true, content: "done" });
+      await running;
+      expect(JSON.stringify(requests[1])).toContain("Change direction");
+    } finally {
+      finish?.({ ok: false, content: "Stopped" });
+      await runtime.abort();
+      await running;
+      await runtime.dispose();
+    }
+  });
+
+  it.each(["local", "remote"] as const)("waits for Stop when a %s shell reports an unconfirmed failure", async (kind) => {
+    let finish!: (value: unknown) => void;
+    const host = { call: vi.fn((method: string) => method === "tools.execute"
+      ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ok: true })) };
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host, ...(kind === "remote" ? { remoteWorkspace: { hostKey: "ssh", path: "/remote" } } : {}) });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      { type: "toolCall", id: "uncertain", name: "Bash", arguments: { command: "sleep 600" } },
+    ]], requests) };
+    const running = runtime.prompt("Run command", "initial-user", "active-turn");
+    try {
+      await vi.waitFor(() => expect(finish).toBeDefined());
+      runtime.steer({ text: "Change direction" }, "active-turn", {
+        id: "steer-user", role: "user", content: "Change direction", createdAt: new Date().toISOString(), steering: true,
+      });
+      finish({ ok: false, content: "lifecycle failed", errorCode: "TOOL_FAILED" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(requests).toHaveLength(1);
+      await runtime.abort();
+      await running;
+      expect(requests).toHaveLength(1);
+    } finally {
+      finish?.({ ok: false, content: "Stopped" });
+      await runtime.abort();
+      await running;
+      await runtime.dispose();
+    }
+  });
+
+  it("skips a write when steering arrives during tool preparation", async () => {
+    let finishPreparation!: (value: unknown) => void;
+    const host = { call: vi.fn((method: string) => method === "project.instructions.resolve"
+      ? new Promise((resolve) => { finishPreparation = resolve; }) : Promise.resolve({ ok: true })) };
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host, projectPath: "/root" });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      { type: "toolCall", id: "prepared-write", name: "Write", arguments: { path: "file.txt", content: "new" } },
+    ]], requests) };
+    const running = runtime.prompt("Write file", "initial-user", "active-turn");
+    try {
+      await vi.waitFor(() => expect(finishPreparation).toBeDefined());
+      runtime.steer({ text: "Do not write" }, "active-turn", {
+        id: "steer-user", role: "user", content: "Do not write", createdAt: new Date().toISOString(), steering: true,
+      });
+      finishPreparation({ entries: [] });
+      await running;
+      expect(host.call.mock.calls.some(([method]) => method === "tools.execute")).toBe(false);
+      expect(JSON.stringify(requests[1])).toContain("Do not write");
+    } finally {
+      finishPreparation?.({ entries: [] });
+      await runtime.abort();
+      await running;
+      await runtime.dispose();
+    }
+  });
+
+  it("settles each parallel read before delivering steering", async () => {
+    const fixture = gatedHost();
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host: fixture.host });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      { type: "toolCall", id: "read-a", name: "Read", arguments: { path: "a.txt" } },
+      { type: "toolCall", id: "read-b", name: "Read", arguments: { path: "b.txt" } },
+    ]], requests) };
+    const running = runtime.prompt("Read files", "initial-user", "active-turn");
+    try {
+      await vi.waitFor(() => expect(fixture.entered).toEqual(["read-a", "read-b"]));
+      runtime.steer({ text: "Change direction" }, "active-turn", {
+        id: "steer-user", role: "user", content: "Change direction", createdAt: new Date().toISOString(), steering: true,
+      });
+      await running;
+      const aborted = fixture.host.call.mock.calls.filter(([method]) => method === "tools.abort");
+      expect(aborted.map(([, args]) => args.toolCallId).sort()).toEqual(["read-a", "read-b"]);
+      expect(toolResults(requests[1]).map((result) => result.id)).toEqual(["read-a", "read-b"]);
+      expect(JSON.stringify(requests[1])).toContain("Change direction");
+    } finally {
+      fixture.drain();
+      await runtime.abort();
+      await running;
+      await runtime.dispose();
+    }
+  });
+
+  it("does not start later sequential tools after steering", async () => {
+    const fixture = gatedHost();
+    const requests: AgentMessage[][] = [];
+    const runtime = createRuntime({ host: fixture.host });
+    (runtime as any).models = { streamSimple: scriptedStream([[
+      { type: "toolCall", id: "first", name: "Bash", arguments: { command: "sleep 600" } },
+      { type: "toolCall", id: "second", name: "Bash", arguments: { command: "echo unexpected" } },
+    ]], requests) };
+    const running = runtime.prompt("Run commands", "initial-user", "active-turn");
+    try {
+      await vi.waitFor(() => expect(fixture.entered).toEqual(["first"]));
+      runtime.steer({ text: "Change direction" }, "active-turn", {
+        id: "steer-user", role: "user", content: "Change direction", createdAt: new Date().toISOString(), steering: true,
+      });
+      await running;
+      expect(fixture.entered).toEqual(["first"]);
+      expect(JSON.stringify(requests[1])).toContain("Skipped because new user input is waiting");
+      expect(JSON.stringify(requests[1])).toContain("Change direction");
+    } finally {
+      fixture.drain();
+      await runtime.abort();
+      await running;
+      await runtime.dispose();
+    }
+  });
 
   it.each(["during", "before"] as const)("handles steering %s TaskWait while its delegate continues running", async (timing) => {
     subagentRuns.calls.length = 0;
@@ -12206,7 +13629,7 @@ describe("DesktopAgentRuntime delegation wait settlement safety", () => {
     }
   });
 
-  it("lets user Stop interrupt auto-resume even if a delegate ignores abort", async () => {
+  it("interrupts auto-resume but keeps Stop pending until an uncooperative delegate retires", async () => {
     const runtime = createRuntime({ subagents: [explorer] });
     subagentRuns.calls.length = 0;
     subagentRuns.instances.length = 0;
@@ -12221,9 +13644,16 @@ describe("DesktopAgentRuntime delegation wait settlement safety", () => {
       const resume = (runtime as any).resumeAfterDelegations();
       await Promise.resolve();
 
-      await runtime.abort();
+      let acknowledged = false;
+      const stopping = runtime.abort().then(() => { acknowledged = true; });
       await resume;
+      expect(acknowledged).toBe(false);
+      expect(runtime.getStatus().isRunning).toBe(true);
+      subagentRuns.resolveRun!({ agentName: "explorer", status: "aborted", report: "", turns: 0, toolCalls: 0 });
+      await stopping;
+      expect(runtime.getStatus().isRunning).toBe(false);
     } finally {
+      (subagentRuns.resolveRun as ((result: unknown) => void) | undefined)?.({ agentName: "explorer", status: "aborted", report: "", turns: 0, toolCalls: 0 });
       subagentRuns.ignoreAbort = false;
       subagentRuns.deferred = false;
       await runtime.dispose();
@@ -13213,5 +14643,65 @@ describe("parallel policy tool provenance", () => {
       expect(host.call.mock.calls.some(([method]) =>
         ["project.instructions.resolve", "tools.prepareFileCall"].includes(method))).toBe(false);
     } finally { internal.extensionRunner = undefined; await runtime.dispose(); }
+  });
+});
+
+
+describe("background Bash job waits in the production runtime", () => {
+  it.each(["steer", "abort"] as const)("releases a wait on %s without stopping the process", async action => {
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    let finish!: (value: unknown) => void;
+    const host = { call: vi.fn(async (method: string) => {
+      if (method === "backgroundJobs.capabilities") return { version: 1, supported: true };
+      if (method === "backgroundJobs.wait") {
+        entered();
+        return new Promise(resolve => { finish = resolve; });
+      }
+      return {};
+    }) };
+    const runtime = createRuntime({ host, subagents: [] });
+    const requests: AgentMessage[][] = [];
+    const internals = runtime as unknown as {
+      models: { streamSimple: (model: unknown, context: { messages: AgentMessage[] }) => ReturnType<typeof createAssistantMessageEventStream> };
+    };
+    internals.models = { streamSimple: (_model, context) => {
+      requests.push([...context.messages]);
+      const first = requests.length === 1;
+      const message = assistantMessage({
+        content: first
+          ? [{ type: "toolCall", id: "wait-bash", name: "TaskWait", arguments: { job: { kind: "bash", id: "process" } } }]
+          : [{ type: "text", text: "Handled new input." }],
+        stopReason: first ? "toolUse" : "stop",
+      }) as unknown as AssistantMessage;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: message });
+        stream.push({ type: "done", reason: first ? "toolUse" : "stop", message });
+        stream.end(message);
+      });
+      return stream;
+    } };
+    const running = runtime.prompt("Wait for the background test.", "user", "job-turn");
+    try {
+      await waiting;
+      if (action === "steer") {
+        runtime.steer({ text: "Handle this correction." }, "job-turn", {
+          id: "new-user", role: "user", content: "Handle this correction.",
+          createdAt: "2026-11-05T00:00:00.000Z", steering: true,
+        });
+      } else {
+        await runtime.abort();
+      }
+      await running;
+      if (action === "steer") {
+        expect(JSON.stringify(requests.at(-1))).toContain("Interrupted by new user input");
+        expect(JSON.stringify(requests.at(-1))).toContain("Handle this correction.");
+      }
+      expect(host.call.mock.calls.some(([method]) => method === "backgroundJobs.stop")).toBe(false);
+      finish({ state: "running" });
+    } finally {
+      await runtime.dispose();
+    }
   });
 });

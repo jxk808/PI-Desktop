@@ -16,6 +16,7 @@ import {
   bindingForCustomModel,
   bindingForCustomModelInfo,
   bindingFromModelInfo,
+  fastModeBillingOn,
   formatTokenCount,
   modelMatchesFilter,
   nativeWebSearchSupportedOn,
@@ -34,7 +35,7 @@ import {
   matchPresetIndex,
 } from "../../lib/model-limit-presets";
 import { api } from "../../lib/api";
-import { Button, Field, HelpIcon, Input, Tooltip, TooltipButton, cx } from "../ui";
+import { Badge, Button, Checkbox, Field, HelpIcon, Input, Tooltip, TooltipButton, cx } from "../ui";
 import { IconClose, IconGripVertical, IconHelp, IconPlus, IconRefresh, IconSearch } from "../icons";
 import { ReasoningEffortSelect } from "./ReasoningEffortSelect";
 import { SettingsMenuSelect } from "./SettingsMenuSelect";
@@ -309,6 +310,14 @@ export function ModelSelectionPanes({
   // Use the same published endpoint routing as the runtime. A disabled control
   // means this connection is not integrated, not that the vendor cannot search.
   const nativeWebSearchWireCapable = nativeWebSearchSupportedOn(apiStyle, lookupContext?.baseUrl);
+  // Fast mode rides the Responses `service_tier` field; the hint names what
+  // the priority tier costs on this wire (ADR 0334).
+  const fastModeBilling = fastModeBillingOn(apiStyle);
+  const fastModeHint = fastModeBilling === "subscription"
+    ? "settings.fastModeAllowedSubscriptionHint"
+    : fastModeBilling === "usage"
+      ? "settings.fastModeAllowedUsageHint"
+      : "settings.fastModeAllowedUnsupported";
 
   /**
    * The chosen list narrows with the discovered list's rule plus the binding's
@@ -663,6 +672,7 @@ export function ModelSelectionPanes({
                     {binding.alias?.trim() ? (
                       <span className="provider-chosen-row-alias">{binding.alias.trim()}</span>
                     ) : null}
+                    {imageModelSelected ? <Badge>{t("settings.imageModelSelected")}</Badge> : null}
                     <span className="provider-chosen-row-limits">
                       {formatTokenCount(displayedContextWindow)} ·{" "}
                       {formatTokenCount(displayedMaxTokens)}
@@ -965,9 +975,9 @@ export function ModelSelectionPanes({
                           }
                         />
                         {onImageModelChange ? (
-                          <label className="provider-chosen-capability">
-                            <input
-                              type="checkbox"
+                          <span className="provider-chosen-delegation">
+                            <Checkbox
+                              className="provider-chosen-capability"
                               checked={imageModelSelected}
                               disabled={busy}
                               aria-label={t(
@@ -978,15 +988,14 @@ export function ModelSelectionPanes({
                               onChange={(event) =>
                                 onImageModelChange(binding.id, event.target.checked)
                               }
-                            />
-                            <span>
-                              {t(
+                              label={t(
                                 imageModelSelected
                                   ? "settings.imageModelSelected"
                                   : "settings.setImageModel",
                               )}
-                            </span>
-                          </label>
+                            />
+                            <HelpIcon label={t("settings.imageModelChatExclusionHint")} />
+                          </span>
                         ) : null}
                         <span className="provider-chosen-delegation">
                           <label className="provider-chosen-capability">
@@ -1036,6 +1045,28 @@ export function ModelSelectionPanes({
                                 ? "settings.nativeWebSearchHint"
                                 : "settings.nativeWebSearchUnsupported",
                             )}
+                          >
+                            <IconHelp size={13} />
+                          </Tooltip>
+                        </span>
+                        <span className="provider-chosen-delegation">
+                          <label className="provider-chosen-capability">
+                            <input
+                              type="checkbox"
+                              checked={binding.fastModeAllowed === true}
+                              disabled={!fastModeBilling}
+                              onChange={(event) =>
+                                updateBinding(binding.id, {
+                                  fastModeAllowed: event.target.checked || undefined,
+                                })
+                              }
+                            />
+                            <span>{t("settings.fastModeAllowed")}</span>
+                          </label>
+                          <Tooltip
+                            className="provider-chosen-delegation-help"
+                            label={t(fastModeHint)}
+                            ariaLabel={t(fastModeHint)}
                           >
                             <IconHelp size={13} />
                           </Tooltip>

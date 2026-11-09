@@ -7,6 +7,7 @@ import type {
 } from "../features/chat/composer/hooks/useComposerCompletions";
 import {
   IconBookOpen,
+  IconBot,
   IconFileText,
   IconFolder,
   IconPlug,
@@ -88,11 +89,13 @@ export function ComposerAutocomplete({
       key:
         item.kind === "command"
           ? `c:${item.command.kind}:${item.command.name}`
-          : item.kind === "plugin"
-            ? `pl:${item.pluginId}:${index}`
-            : item.kind === "subagent"
-              ? `s:${item.subagent.name}`
-              : `p:${item.entry.path}`,
+          : item.kind === "agent"
+            ? `a:${item.agent.name}`
+            : item.kind === "plugin"
+              ? `pl:${item.pluginId}:${index}`
+              : item.kind === "subagent"
+                ? `s:${item.subagent.name}`
+                : `p:${item.entry.path}`,
       type: "button" as const,
       role: "option" as const,
       "aria-selected": active,
@@ -122,6 +125,21 @@ export function ComposerAutocomplete({
           ) : null}
           {item.command.description ? (
             <span className="composer-ac-desc">{item.command.description}</span>
+          ) : null}
+        </button>
+      );
+    }
+    if (item.kind === "agent") {
+      return (
+        <button {...commonProps} aria-label={`@${item.agent.name}`} title={item.agent.description}>
+          <span className="composer-ac-icon">
+            <IconBot size={14} />
+          </span>
+          <span className="composer-ac-name">
+            @<Highlighted text={item.agent.name} ranges={item.match.ranges} />
+          </span>
+          {item.agent.description ? (
+            <span className="composer-ac-desc">{item.agent.description}</span>
           ) : null}
         </button>
       );
@@ -166,8 +184,17 @@ export function ComposerAutocomplete({
 
   const rows: React.ReactNode[] = [];
   let lastGroup: string | null = null;
+  // Keep file rows distinct from either kind of delegation completion.
+  const hasAgents = ac.items.some((item) => item.kind === "agent" || item.kind === "subagent");
   ac.items.forEach((item, index) => {
-    if (item.kind === "command") {
+    if ((item.kind === "agent" || (item.kind === "path" && hasAgents)) && lastGroup !== item.kind) {
+      lastGroup = item.kind;
+      rows.push(
+        <div key={`g:${item.kind}`} className="composer-model-group-label">
+          {t(item.kind === "agent" ? "chat.mentionGroupAgents" : "chat.mentionGroupFiles")}
+        </div>,
+      );
+    } else if (item.kind === "command") {
       const group = item.command.kind;
       if (group !== lastGroup) {
         lastGroup = group;

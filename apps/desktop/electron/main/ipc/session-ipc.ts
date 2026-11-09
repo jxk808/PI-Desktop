@@ -1,4 +1,5 @@
 import { shell } from "electron";
+import type { ModeCatalogService } from "../runtime/mode-catalog";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import {
@@ -105,6 +106,8 @@ export type SessionIpcDependencies = {
   };
   forgetTranscriptRewriteHistory: (sessionId: string) => void;
   stripWinLongPrefix: (path: string) => string;
+  /** Resolves the definition snapshot attached to a mode selection. */
+  modeCatalog: Pick<ModeCatalogService, "snapshotFor">;
 };
 
 export function registerSessionIpc({
@@ -123,6 +126,7 @@ export function registerSessionIpc({
   beginTranscriptRewrite,
   forgetTranscriptRewriteHistory,
   stripWinLongPrefix,
+  modeCatalog,
 }: SessionIpcDependencies): void {
   let host: HostProcess | null = null;
   let sidecar: AgentSidecar | null = null;
@@ -135,9 +139,9 @@ export function registerSessionIpc({
   };
 
   /**
-   * The one gate for the two transcript-rewrite entrances — replacement and
-   * revision activation rewrite the same host-side transcript rows, so both
-   * go through this boundary instead of each entrance remembering its own
+   * The shared gate for transcript-rewrite entrances — replacement, bounded
+   * mutations and revision activation all rewrite the host-side transcript.
+   * Each entrance uses this boundary rather than remembering its own
    * (#1612, #1613): refuse while a turn is running (consistent with fork and
    * move), serialize overlapping operations per session, and drain the
    * persistence outbox so writes queued before the rewrite land in the old
@@ -153,6 +157,7 @@ export function registerSessionIpc({
     purpose: string,
     currentHost: HostProcess,
     run: () => Promise<T>,
+    options: { strictDrain?: boolean; didRewrite?: (result: T) => boolean } = {},
   ): Promise<T> => {
     rejectNativeMutation(sessionId, purpose);
     const releaseSessionOperation = await acquireSessionOperation(sessionId);
@@ -165,7 +170,11 @@ export function registerSessionIpc({
         );
       }
       rewriteFence = beginTranscriptRewrite(sessionId);
-      await persistenceOutbox.prepareSessionReplacement(sessionId, () => currentHost);
+      if (options.strictDrain) {
+        await persistenceOutbox.prepareSessionMutation(sessionId, () => currentHost);
+      } else {
+        await persistenceOutbox.prepareSessionReplacement(sessionId, () => currentHost);
+      }
       if (sidecar) {
         sidecar.clearProjectInstructionRoot(sessionId);
         sidecar.clearVendorAuthBindings(sessionId);
@@ -174,7 +183,8 @@ export function registerSessionIpc({
           .catch(() => undefined);
       }
       const result = await run();
-      rewriteFence.commit();
+      if (options.didRewrite?.(result) === false) rewriteFence.rollback();
+      else rewriteFence.commit();
       return result;
     } catch (error) {
       rewriteFence?.rollback();
@@ -215,6 +225,7 @@ export function registerSessionIpc({
       : { sessions: [] as RuntimeSession[] };
     return {
       ...result,
+      runningSessionIds: [...activeTurns.keys()],
       sessions: [
         ...result.sessions.map((session) => ({
           ...enrichSession(session, providers, defaults),
@@ -364,6 +375,20 @@ export function registerSessionIpc({
       });
     }
     return readSessionCollaboration(host, sidecar, sessionId);
+  });
+  handle(IPC.invoke.sessionUsageCost, async (input?: { sessionId?: unknown }) => {
+    const sessionId = typeof input?.sessionId === "string" ? input.sessionId.trim() : "";
+    if (!sessionId || sessionId.length > 256) {
+      throw Object.assign(new Error("sessionId must be a non-empty string of at most 256 characters"), {
+        errorCode: ErrorCodes.INVALID_ARGUMENT,
+      });
+    }
+    // Imported native Pi sessions have no Desktop turn ledger to roll up.
+    if (sessionId.startsWith("native-pi:")) {
+      return { sessionId, turnCount: 0, requestCount: 0, providers: [] };
+    }
+    if (!host) throw new Error("host unavailable");
+    return host.call("session.usageCost", { sessionId });
   });
   handle(IPC.invoke.sessionOpen, async (rawSessionId: string) => {
     if (!host) throw new Error("host unavailable");
@@ -515,6 +540,45 @@ export function registerSessionIpc({
     },
   );
   handle(
+    IPC.invoke.sessionDeleteMessage,
+    async (input: { sessionId: string; messageId: string }) => {
+      if (!host) throw new Error("host unavailable");
+      const sessionId = String(input?.sessionId || "");
+      if (!sessionId) throw new Error("sessionId required");
+      const currentHost = host;
+      return runTranscriptRewrite(
+        sessionId,
+        "message deletion",
+        currentHost,
+        () => currentHost.call<{ deleted: boolean }>("session.deleteMessage", {
+          sessionId,
+          messageId: String(input?.messageId || ""),
+        }),
+        { strictDrain: true, didRewrite: (result) => result.deleted },
+      );
+    },
+  );
+  handle(
+    IPC.invoke.sessionRetractPendingPrompt,
+    async (input: { sessionId: string; userMessageId: string; turnId?: string }) => {
+      if (!host) throw new Error("host unavailable");
+      const sessionId = String(input?.sessionId || "");
+      if (!sessionId) throw new Error("sessionId required");
+      const currentHost = host;
+      return runTranscriptRewrite(
+        sessionId,
+        "pending prompt retraction",
+        currentHost,
+        () => currentHost.call<{ retracted: boolean }>("session.retractPendingPrompt", {
+          sessionId,
+          userMessageId: String(input?.userMessageId || ""),
+          ...(input?.turnId === undefined ? {} : { turnId: input.turnId }),
+        }),
+        { strictDrain: true, didRewrite: (result) => result.retracted },
+      );
+    },
+  );
+  handle(
     IPC.invoke.sessionSaveRevision,
     async (input: {
       sessionId: string;
@@ -550,6 +614,7 @@ export function registerSessionIpc({
       rootUserId: string;
       revisionIndex: number;
       prefix?: unknown[];
+      requireCanonicalPrefix?: boolean;
     }) => {
       if (!host) throw new Error("host unavailable");
       const sessionId = String(input?.sessionId || "");
@@ -564,8 +629,11 @@ export function registerSessionIpc({
             sessionId,
             rootUserId: String(input?.rootUserId || ""),
             revisionIndex: Number(input?.revisionIndex || 0),
-            prefix: input?.prefix ?? [],
+            ...(input?.requireCanonicalPrefix === true
+              ? { requireCanonicalPrefix: true }
+              : { prefix: input?.prefix ?? [] }),
           }),
+        { strictDrain: input?.requireCanonicalPrefix === true },
       );
     },
   );
@@ -606,13 +674,17 @@ export function registerSessionIpc({
         modelId?: string;
         thinkingLevel?: SessionThinkingLevel;
         permissionMode?: "inherit" | "ask" | "accept-edits" | "auto";
+        fastMode?: boolean;
       },
     ) => {
       rejectNativeMutation(id, "configuration");
       if (!host) throw new Error("host unavailable");
+      // Every mode other than the builtin Agent and Plan carries the parsed
+      // definition; the Host persists it as the session's policy snapshot.
+      const modeSnapshot = await modeCatalog.snapshotFor(config.mode);
       const result = await host.call<{ session?: RuntimeSession | null }>(
         "session.configure",
-        { id, ...config },
+        { id, ...config, ...(modeSnapshot ? { modeSnapshot } : {}) },
       );
       if (!result.session) return result;
       const { providers, defaults } = await sessionCapabilityContext();

@@ -31,8 +31,12 @@ import { applyNodeNetworkProxy } from "./node-proxy.js";
 import { applyAdditiveDefaultCaCertificates } from "./system-ca.js";
 import { NATIVE_PI_SESSION_PREFIX } from "./native-pi-session-id.js";
 import {
+  parseModeLaunchParams,
+  parseModePromptTurn,
+  parseModeTurnNotice,
+} from "./modes/mode-params.js";
+import {
   isCommandShellOption,
-  normalizeMode,
   normalizeNetworkProxy,
   OAUTH_AUTH_KIND,
   readNdjsonLines,
@@ -44,7 +48,7 @@ import type {
   ContextCompactionRecord,
   ContextCompactionSettings,
   CommandShellOption,
-  Mode,
+  ModeTurnContext,
   PlanExecution,
   SessionThinkingLevel,
   UiMessage,
@@ -106,11 +110,16 @@ function testRuntimeIdentity(sessionId: string) {
 
 type RuntimeParams = {
   sessionId: string;
-  mode?: Mode;
+  /** Any valid mode id; validated by `parseModeLaunchParams`. */
+  mode?: unknown;
+  /** Definition of `mode` resolved by Electron main (ADR mode-definitions). */
+  modeDefinition?: unknown;
   /** Durable host turn ID for the prompt currently being executed. */
   turnId?: string;
   thinkingLevel?: SessionThinkingLevel;
   infiniteProviderRetry?: boolean;
+  /** Session `/fast` switch AND the model's opt-in, resolved by main (ADR 0334). */
+  fastMode?: boolean;
   /** Opt-in TypeSafe classifier credential resolved by Electron main. */
   jevApiKey?: string;
   provider: RuntimeProviderConfig;
@@ -183,9 +192,10 @@ function respond(id: string | number, result?: unknown, error?: unknown) {
 async function runtimeFor(
   params: RuntimeParams,
   currentPrompt?: string,
+  modeTurn?: ModeTurnContext,
 ): Promise<DesktopAgentRuntime> {
   const sessionId = String(params.sessionId);
-  const mode = normalizeMode(params.mode);
+  const { mode, modeDefinition } = parseModeLaunchParams(params);
   if (!isCommandShellOption(params.commandShell) || !params.commandShell.available) {
     throw Object.assign(new Error("active command shell is invalid or unavailable"), {
       rpcCode: -32000,
@@ -239,7 +249,7 @@ async function runtimeFor(
       errorCode: "AGENT_BUSY",
     });
   }
-  const reusable = existing?.matches({
+  const config = {
     mode,
     provider,
     providerFallbacks,
@@ -258,10 +268,15 @@ async function runtimeFor(
     remoteWorkspace: params.remoteWorkspace,
     workspaceRoot: params.workspaceRoot,
     commandShell: params.commandShell,
-  })
-    ? existing
-    : undefined;
+  };
+  // Name the first field that disagrees so a cache-invalidating rebuild can be
+  // attributed to its cause (#1948) instead of surfacing only as a reset.
+  const mismatch = existing?.firstMismatch(config) ?? null;
+  const reusable = existing && mismatch === null ? existing : undefined;
   if (existing && !reusable) {
+    console.error(
+      `[runtime] rebuilding ${sessionId}: runtime config mismatch (${mismatch ?? "unknown"})`,
+    );
     await existing.dispose();
     runtimes.delete(sessionId);
   }
@@ -269,40 +284,43 @@ async function runtimeFor(
     reusable.setPluginSkills(pluginSkills);
     reusable.setCompactionSettings(params.compactionSettings);
     reusable.setInfiniteProviderRetry(params.infiniteProviderRetry === true);
-    reusable.setMode(mode);
+    reusable.setFastMode(params.fastMode === true);
+    reusable.setMode(mode, modeDefinition);
     return reusable;
   }
 
-  let history: UiMessage[] = [];
-  let compaction: ContextCompactionRecord | undefined;
-  try {
-    const detail = await hostProxy.call<{
-      session?: {
-        messages?: UiMessage[];
-        compaction?: ContextCompactionRecord;
-      } | null;
-    }>("session.get", { id: sessionId });
-    let restoredMessages = detail?.session?.messages ?? [];
-    // The current prompt is sent separately below. Exclude its persisted row
-    // before attachment hydration so it cannot consume the history byte budget.
-    if (currentPrompt !== undefined && params.userMessageId) {
-      restoredMessages = restoredMessages.filter((message) =>
-        message.role !== "user" || message.id !== params.userMessageId,
-      );
-    }
-    const supportsVision = visionFromModelConfig(params.provider.modelConfig);
-    history = await hydrateAttachmentHistory(restoredMessages, {
-      scratchDir: params.scratchDir,
-      projectPath: params.remoteWorkspace ? undefined : params.projectPath,
-      attachmentsDir: params.attachmentsDir,
-      supportsVision,
+  const detail = await hostProxy.call<{
+    session?: {
+      messages?: UiMessage[];
+      compaction?: ContextCompactionRecord;
+    } | null;
+  }>("session.get", { id: sessionId });
+  if (!detail?.session) {
+    throw Object.assign(new Error("session not found while restoring history"), {
+      errorCode: "SESSION_NOT_FOUND",
     });
-    compaction = detail?.session?.compaction;
-  } catch {
-    // History restore is best-effort; a prompt can still start cleanly.
   }
+  let restoredMessages = detail.session.messages ?? [];
+  // The current prompt is sent separately below. Exclude its persisted row
+  // before attachment hydration so it cannot consume the history byte budget.
+  if (currentPrompt !== undefined && params.userMessageId) {
+    restoredMessages = restoredMessages.filter((message) =>
+      message.role !== "user" || message.id !== params.userMessageId,
+    );
+  }
+  const supportsVision = visionFromModelConfig(params.provider.modelConfig);
+  let history = await hydrateAttachmentHistory(restoredMessages, {
+    scratchDir: params.scratchDir,
+    projectPath: params.remoteWorkspace ? undefined : params.projectPath,
+    attachmentsDir: params.attachmentsDir,
+    supportsVision,
+  });
+  const compaction = detail.session.compaction;
   // Older callers without a stable message id retain the previous content match.
-  if (currentPrompt !== undefined && !params.userMessageId) {
+  // A Host-started mode turn has no user row at all (its content is a fixed
+  // continuation notice), so nothing in the history is its prompt.
+  const hostStartedTurn = modeTurn !== undefined && modeTurn.origin !== "user";
+  if (currentPrompt !== undefined && !params.userMessageId && !hostStartedTurn) {
     const last = history.at(-1);
     if (last?.role === "user" && last.content === currentPrompt) {
       history = history.slice(0, -1);
@@ -312,12 +330,14 @@ async function runtimeFor(
     host: hostProxy,
     sessionId,
     mode,
+    modeDefinition,
     turnId: params.turnId,
     provider,
     providerFallbacks,
     commandShell: params.commandShell,
     thinkingLevel,
     infiniteProviderRetry: params.infiniteProviderRetry === true,
+    fastMode: params.fastMode === true,
     jevApiKey: params.jevApiKey,
     history,
     compaction,
@@ -467,7 +487,10 @@ async function handle(method: string, params: any): Promise<unknown> {
       const attachments = Array.isArray(params.attachments)
         ? (params.attachments as RuntimePromptAttachment[])
         : undefined;
-      const runtime = await runtimeFor(params, content);
+      // Trusted run context from Electron main; a malformed one rejects the
+      // prompt before any runtime is touched (ADR mode-definitions).
+      const modeTurn = parseModePromptTurn(params.modeTurn, parseModeLaunchParams(params));
+      const runtime = await runtimeFor(params, content, modeTurn);
       const userMessageId =
         typeof params.userMessageId === "string" && params.userMessageId
           ? params.userMessageId
@@ -489,6 +512,7 @@ async function handle(method: string, params: any): Promise<unknown> {
         mcpToolNames: parseMcpToolNames(params.mcpToolNames),
         attachments,
         ...(params.sessionMessage ? { sessionMessage: params.sessionMessage as SessionMessageOrigin } : {}),
+        ...(modeTurn ? { modeTurn } : {}),
       };
       void runtime.prompt(prompt, userMessageId, turnId).catch((err) => {
         // Rejected-prompt path (pre-flight/transport failures). Streamed
@@ -533,6 +557,8 @@ async function handle(method: string, params: any): Promise<unknown> {
         ...params,
         sessionId,
         mode: "agent",
+        // Approved plans always execute as the builtin Agent.
+        modeDefinition: undefined,
         turnId,
       });
       void runtime.executeApprovedPlan(execution, turnId).catch((err) => {
@@ -612,6 +638,10 @@ async function handle(method: string, params: any): Promise<unknown> {
         String(params.name ?? ""),
         String(params.args ?? ""),
       );
+    }
+    case "agent.modeTurnNotice": {
+      const runtime = runtimes.get(String(params.sessionId ?? ""));
+      return runtime?.modeTurnNotice(parseModeTurnNotice(params)) ?? { applied: false };
     }
     case "agent.getStatus": {
       const sessionId = String(params.sessionId);

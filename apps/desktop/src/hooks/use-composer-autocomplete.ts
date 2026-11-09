@@ -39,8 +39,11 @@ const SOURCE_TTL_MS = 10_000;
 /** Typing pause before a query searches past a truncated file index. */
 const FILE_SEARCH_DEBOUNCE_MS = 150;
 
+export type AutocompleteAgent = { name: string; description: string };
+
 export type AutocompleteItem =
   | { kind: "command"; command: ComposerCommand; match: FuzzyMatch }
+  | { kind: "agent"; agent: AutocompleteAgent; match: FuzzyMatch }
   | { kind: "path"; entry: FsIndexEntry; match: FuzzyMatch }
   | SubagentCompletion;
 
@@ -55,6 +58,9 @@ let filesCache: {
   entries: FsIndexEntry[];
   truncated: boolean;
 } | null = null;
+
+/** The delegation catalog `Task` offers, for the `@` menu's Agents group (ADR 0346). */
+let agentsCache: { key: string; at: number; agents: AutocompleteAgent[] } | null = null;
 
 const COMMAND_GROUP_ORDER = {
   template: 0,
@@ -106,6 +112,34 @@ function filterCommands(
     );
   });
   return matched.map(({ command, match }) => ({ kind: "command", command, match }));
+}
+
+/**
+ * Agents matching the `@` query, by name or description. A root entry of the
+ * same name hides its agent: send-time resolution gives that token to the
+ * file, so the menu must not offer a delegation it would not perform.
+ */
+function filterAgents(
+  agents: readonly AutocompleteAgent[],
+  query: string,
+  entries: readonly FsIndexEntry[],
+): AutocompleteItem[] {
+  const shadowed = new Set(entries.map((entry) => entry.path));
+  const matched: Array<{ agent: AutocompleteAgent; match: FuzzyMatch }> = [];
+  for (const agent of agents) {
+    if (shadowed.has(agent.name)) continue;
+    const byName = fuzzyMatchCommand(query, agent.name);
+    const byDescription = byName ? null : fuzzyMatchCommand(query, agent.description);
+    const match = byName ?? (byDescription ? { score: Math.max(0, byDescription.score - 20), ranges: [] } : null);
+    if (match) matched.push({ agent, match });
+  }
+  matched.sort((a, b) =>
+    compareMatches(
+      { score: a.match.score, text: a.agent.name },
+      { score: b.match.score, text: b.agent.name },
+    ),
+  );
+  return matched.map(({ agent, match }) => ({ kind: "agent", agent, match }));
 }
 
 function filterFiles(entries: FsIndexEntry[], query: string): AutocompleteItem[] {
@@ -181,11 +215,14 @@ export function useComposerAutocomplete({
   cursor,
   composing,
   enabled,
+  agentsEnabled = false,
 }: {
   value: string;
   cursor: number;
   composing: boolean;
   enabled: boolean;
+  /** Offer subagents in the `@` menu; only Agent mode may delegate (ADR 0346). */
+  agentsEnabled?: boolean;
 }) {
   const { t } = useTranslation();
   const remoteScope = useAppStore((s) => JSON.stringify(s.sessions.find((session) => session.id === s.activeSessionId)?.remoteWorkspace ?? null));
@@ -204,6 +241,7 @@ export function useComposerAutocomplete({
     entries: FsIndexEntry[];
     truncated: boolean;
   } | null>(null);
+  const [agents, setAgents] = useState<AutocompleteAgent[] | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [dismissedKey, setDismissedKey] = useState<string | null>(null);
   const frozenRef = useRef<ComposerTrigger | null>(null);
@@ -289,6 +327,35 @@ export function useComposerAutocomplete({
     };
   }, [trigger?.mode, dismissed, workspaceKey, hasWorkspace, sessionId]);
 
+  // The Agents group reads the same catalog `Task` is built from. A failed
+  // read leaves the group empty; the file rows still answer.
+  const wantAgents = agentsEnabled && trigger?.mode === "file" && !dismissed;
+  useEffect(() => {
+    if (!wantAgents) return;
+    if (
+      agentsCache &&
+      agentsCache.key === workspaceKey &&
+      Date.now() - agentsCache.at < SOURCE_TTL_MS
+    ) {
+      setAgents(agentsCache.agents);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .subagentCatalog()
+      .then((catalog) => {
+        const next = catalog.subagents.map(({ name, description }) => ({ name, description }));
+        agentsCache = { key: workspaceKey, at: Date.now(), agents: next };
+        if (!cancelled) setAgents(next);
+      })
+      .catch(() => {
+        if (!cancelled) setAgents([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wantAgents, workspaceKey]);
+
   // A truncated index keeps only the shallowest entries, so a deep file of a
   // large tree matches nothing in it. Once typing pauses, the query also
   // searches the main process's full listing (D669); the answer belongs to
@@ -344,14 +411,20 @@ export function useComposerAutocomplete({
           )
         : [];
     }
-    return [
-      ...filterSubagents(subagents, trigger.query),
-      ...filterFiles(
-        foundHere ? [...foundHere.entries, ...(files?.entries ?? [])] : (files?.entries ?? []),
-        trigger.query,
-      ),
-    ];
-  }, [trigger, dismissed, commands, remoteSession, files, foundHere, subagents]);
+    const entries = foundHere
+      ? [...foundHere.entries, ...(files?.entries ?? [])]
+      : (files?.entries ?? []);
+    const agentItems = agentsEnabled && agents && files
+      ? filterAgents(agents, trigger.query, entries)
+      : [];
+    const subagentItems = filterSubagents(subagents, trigger.query);
+    // Chinese alias selection keeps the custom plain-text instruction;
+    // native agent rows still insert upstream's atomic @agent chips.
+    const mentions = /\p{Script=Han}/u.test(trigger.query)
+      ? [...subagentItems, ...agentItems]
+      : [...agentItems, ...subagentItems];
+    return [...mentions, ...filterFiles(entries, trigger.query)];
+  }, [trigger, dismissed, commands, remoteSession, files, foundHere, agentsEnabled, agents, subagents]);
 
   // New query or mode restarts keyboard navigation at the top hit.
   const itemsKey = trigger ? `${trigger.mode}:${trigger.query}` : "";
@@ -376,6 +449,7 @@ export function useComposerAutocomplete({
           value: string;
           cursor: number;
           fileReference?: { path: string; name: string };
+          agentReference?: { name: string };
         }
       | null => {
       if (!trigger) return null;
@@ -386,6 +460,12 @@ export function useComposerAutocomplete({
           name: item.subagent.name,
           label: item.label,
         }));
+      }
+      if (item.kind === "agent") {
+        return {
+          ...applyCompletion(value, trigger, ""),
+          agentReference: { name: item.agent.name },
+        };
       }
       if (item.kind === "path" && item.entry.kind === "file") {
         return {

@@ -8,8 +8,9 @@ import {
   type SessionThinkingLevel,
   type PluginComposerTransformMeta,
 } from "@pi-desktop/shared";
-import type { AppState } from "../../../stores/app-store";
+import { type AppState, useAppStore } from "../../../stores/app-store";
 import { ComposerModePicker } from "./ComposerModePicker";
+import { modeErrorMessage } from "../../modes/mode-run-model";
 import { ComposerPermissionPicker } from "./ComposerPermissionPicker";
 import { ContextUsageInspector } from "../../../components/ContextUsageInspector";
 import { ComposerControlSlots } from "./ComposerControlSlots";
@@ -22,6 +23,7 @@ import {
   IconUndo2,
 } from "../../../components/icons";
 import { LiveVoiceControls } from "../../voice/live/LiveVoiceControls";
+import { ComputerUseIndicator } from "../../computer-use/ComputerUseIndicator";
 import { ComposerModelPicker } from "./ComposerModelPicker";
 import type { useComposerModelMenu } from "./hooks/useComposerModelMenu";
 
@@ -51,6 +53,8 @@ export type ComposerToolbarProps = {
   modelMenu: ModelMenuController;
   modelLabel: string;
   thinkingLabel: string;
+  /** The selected model asks for OpenAI's priority tier (ADR 0334). */
+  modelFastMode?: boolean;
   contextUsage: ContextUsage | null;
   value: string;
   modelReady: boolean;
@@ -92,6 +96,7 @@ export function ComposerToolbar({
   modelMenu,
   modelLabel,
   thinkingLabel,
+  modelFastMode = false,
   contextUsage,
   value,
   modelReady,
@@ -129,6 +134,9 @@ export function ComposerToolbar({
           </TooltipButton>
         </div>
         {localToolsAllowed ? <LiveVoiceControls t={t} workSessionId={workSessionId} /> : null}
+        {localToolsAllowed ? (
+          <ComputerUseIndicator sessionId={workSessionId ?? null} abort={abort} />
+        ) : null}
         <ComposerModePicker
           t={t}
           mode={mode}
@@ -149,7 +157,8 @@ export function ComposerToolbar({
                 thinkingLevel,
               });
             } catch (error) {
-              showToast(error instanceof Error ? error.message : String(error), {
+              // MODE_RUN_ACTIVE / MODE_NOT_FOUND are named, not shown raw.
+              showToast(modeErrorMessage(t, error), {
                 variant: "error",
               });
             }
@@ -189,11 +198,13 @@ export function ComposerToolbar({
           controller={modelMenu}
           modelLabel={modelLabel}
           thinkingLabel={thinkingLabel}
+          fastMode={modelFastMode}
           thinkingLevel={thinkingLevel}
           selectedProviderId={providerId}
           selectedModelId={modelId}
           controlsBlocked={controlsBlocked}
           onCloseOtherMenus={() => setPermissionOpen(false)}
+          onOpenModelSettings={() => useAppStore.getState().setSettingsTab("agent")}
         />
         {composerTransforms.map((transform) => {
           const key = `${transform.pluginId}/${transform.id}`;
