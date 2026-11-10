@@ -1,0 +1,97 @@
+name: Custom macOS arm64 full installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['build/custom-macos-arm64']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-macos-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'jxk808/PI-Desktop'
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Require native Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Prepare isolated scratch
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/pi-custom-macos"
+          mkdir -p "$scratch"
+          echo "PI_SCRATCH_DIR=$scratch" >> "$GITHUB_ENV"
+          echo "PI_CUSTOM_AUTOMATION_RUNTIME=$scratch/automation-input" >> "$GITHUB_ENV"
+      - name: Install locked source dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare verified native automation runtime
+        run: node custom/prepare-macos-runtime.mjs "$PI_CUSTOM_AUTOMATION_RUNTIME"
+      - name: Build dependencies and check types
+        run: |
+          set -euo pipefail
+          pnpm --filter '@pi-desktop/desktop^...' build
+          pnpm --filter @pi-desktop/desktop typecheck
+      - name: Test current Rust host source
+        run: cargo test --locked -p host-core
+      - name: Test custom interfaces and native runtime relocation
+        run: |
+          set -euo pipefail
+          node --test custom/integration.test.mjs custom/packaged-runtime.test.mjs custom/macos-package.test.mjs custom/macos-automation-runtime.test.mjs apps/desktop/test/codex-batch-automation.test.mjs apps/desktop/test/provider-account-fallback-launch.test.mjs
+          PI_TEST_MACOS_AUTOMATION_ROOT="$PI_CUSTOM_AUTOMATION_RUNTIME" node --test custom/macos-automation-runtime.test.mjs
+          (cd custom/auto-codex-auth && "$PI_CUSTOM_AUTOMATION_RUNTIME/.python-runtime/bin/python3" -m unittest discover -s tests -v)
+          npm --prefix custom/subscription-quota ci --ignore-scripts --no-audit --no-fund
+          npm --prefix custom/subscription-quota test
+      - name: Test account recovery and runtime
+        working-directory: packages/agent-runtime
+        run: pnpm exec vitest run src/runtime.test.ts src/provider-account-fallback.test.ts src/provider-account-fallback-flow.test.ts src/provider-retry.test.ts src/provider-recovery-flow.test.ts --config vitest.config.ts
+      - name: Build full custom installer from source
+        run: node custom/build.mjs
+      - name: Verify actual DMG and ZIP payloads
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          mount="$PI_SCRATCH_DIR/dmg-mounted"
+          mkdir -p "$mount"
+          hdiutil attach "apps/desktop/release/PI-Desktop-$version-arm64.dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount" || true' EXIT
+          node custom/verify-macos-package.mjs "$mount/PI-Desktop.app"
+          PI_TEST_MACOS_AUTOMATION_ROOT="$mount/PI-Desktop.app/Contents/Resources/codex-automation" node --test custom/macos-automation-runtime.test.mjs
+          hdiutil detach "$mount"
+          trap - EXIT
+          ziproot="$PI_SCRATCH_DIR/zip-extracted"
+          mkdir -p "$ziproot"
+          ditto -x -k "apps/desktop/release/PI-Desktop-$version-arm64-mac.zip" "$ziproot"
+          node custom/verify-macos-package.mjs "$ziproot/PI-Desktop.app"
+          git diff --exit-code -- Cargo.lock pnpm-lock.yaml
+      - name: Upload verified installers and provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: custom-macos-arm64-${{ github.sha }}
+          path: dist/custom-macos-arm64/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

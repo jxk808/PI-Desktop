@@ -184,6 +184,10 @@ def select_project_node_executable() -> Path:
         relative_path = (
             Path(f"node-{PROJECT_NODE_VERSION}-linux-{architecture}") / "bin" / "node"
         )
+    elif sys.platform == "darwin":
+        relative_path = (
+            Path(f"node-{PROJECT_NODE_VERSION}-darwin-{architecture}") / "bin" / "node"
+        )
     else:
         raise OAuthError(f"unsupported operating system: {platform.system()}")
     return PROJECT_NODE_RUNTIME_PATH / relative_path

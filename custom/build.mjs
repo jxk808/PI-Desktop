@@ -23,9 +23,13 @@ for (const name of HELPER_SOURCES) {
 for (const name of ["main.js", "manifest.json", "LICENSE", "views/quota.html"]) {
   if (!existsSync(join(plugin, name))) throw new Error(`Missing quota source: ${name}`);
 }
+const mac = process.platform === "darwin";
+const runtimeTools = mac ? await import("./macos-automation-runtime.mjs") : null;
+const checkRuntime = runtimeTools?.validateMacRuntime ?? validateRuntime;
+const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const runtime = process.env.PI_CUSTOM_AUTOMATION_RUNTIME;
 if (runtime || !args.has("--check")) {
-  const checked = validateRuntime(runtime, helper);
+  const checked = checkRuntime(runtime, helper);
   console.log(`Portable automation inventory SHA-256: ${checked.digest}`);
 } else {
   console.log("Portable runtime not supplied; source checks only. Full builds require PI_CUSTOM_AUTOMATION_RUNTIME.");
@@ -34,13 +38,16 @@ if (args.has("--check")) {
   console.log(`Custom sources OK: core + ${manifest.id}@${manifest.version} + automation helper`);
   process.exit(0);
 }
-if (process.platform !== "win32") throw new Error("This custom installer currently targets Windows x64 only");
+if (!((process.platform === "win32" && process.arch === "x64") || (mac && process.arch === "arm64"))) {
+  throw new Error("Custom installers require native Windows x64 or macOS arm64");
+}
+if (mac && args.has("--reuse-installed-host")) throw new Error("macOS packages must build host-core from source");
 function run(command, commandArgs, cwd = root) {
   const result = spawnSync(command, commandArgs, { cwd, stdio: "inherit", shell: command.endsWith(".cmd") });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed: ${result.status}`);
 }
-run("pnpm.cmd", ["--filter", "@pi-desktop/desktop", "run", "build:deps"]);
+run(pnpm, ["--filter", "@pi-desktop/desktop", "run", "build:deps"]);
 if (args.has("--reuse-installed-host")) {
   const installed = process.env.PI_CUSTOM_INSTALLED_HOST;
   if (!installed || !existsSync(installed)) throw new Error("Set PI_CUSTOM_INSTALLED_HOST to the verified host-core executable");
@@ -48,15 +55,16 @@ if (args.has("--reuse-installed-host")) {
   mkdirSync(dirname(target), { recursive: true });
   copyFileSync(installed, target);
 } else {
-  run("cargo", ["build", "--release", "--manifest-path", join(root, "Cargo.toml"), "-p", "host-core"]);
+  run("cargo", ["build", "--release", "--locked", "--manifest-path", join(root, "Cargo.toml"), "-p", "host-core"]);
 }
-run("pnpm.cmd", ["-C", "packages/agent-runtime", "bundle"]);
-run("pnpm.cmd", ["--filter", "@pi-desktop/desktop", "run", "build"]);
+run(pnpm, ["-C", "packages/agent-runtime", "bundle"]);
+run(pnpm, ["--filter", "@pi-desktop/desktop", "run", "build"]);
 const pkg = JSON.parse(readFileSync(join(desktop, "package.json"), "utf8"));
 const temporary = mkdtempSync(join(process.env.PI_SCRATCH_DIR || tmpdir(), "pi-custom-build-"));
 try {
   const automation = join(temporary, "codex-automation");
-  assembleRuntime(runtime, helper, automation);
+  if (mac) runtimeTools.assembleMacRuntime(runtime, helper, automation);
+  else assembleRuntime(runtime, helper, automation);
   const config = {
     ...pkg.build,
     afterPack: join(root, "custom/after-pack.mjs"),
@@ -67,9 +75,20 @@ try {
       { from: automation, to: "codex-automation", filter: ["**/*", "**/.*", "**/.*/**/*"] },
     ],
   };
+  if (mac) {
+    // Personal builds have no Developer ID certificate or Apple notarization credentials.
+    config.mac = {
+      ...config.mac,
+      identity: "-",
+      notarize: false,
+      // Preserve the validated portable inventory and the source-built Rust host.
+      signIgnore: ["/Contents/Resources/codex-automation(?:/|$)", "/Contents/Resources/bin/pi-desktop-host-core$"],
+    };
+    config.publish = [{ provider: "github", owner: "jxk808", repo: "PI-Desktop" }];
+  }
   const path = join(temporary, "electron-builder.json");
   writeFileSync(path, JSON.stringify(config, null, 2));
-  run("pnpm.cmd", ["exec", "electron-builder", "--config", path, "--win", "nsis", "--publish", "never"], desktop);
+  run(pnpm, ["exec", "electron-builder", "--config", path, ...(mac ? ["--mac", "--arm64"] : ["--win", "nsis"]), "--publish", "never"], desktop);
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
