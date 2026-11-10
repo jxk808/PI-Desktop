@@ -43,6 +43,13 @@ Pop-Location
 pnpm --filter @pi-desktop/desktop typecheck
 ```
 
+## Build a complete macOS arm64 package
+
+Apple Silicon (including M2) full custom DMG/ZIP builds now have a separate native
+GitHub Actions lane. It bundles the quota plugin and portable automation runtime
+without requiring Apple Developer credentials. See [Mac setup and installation](MACOS.md).
+Windows packaging and its runtime preparation remain unchanged.
+
 ## Build a complete Windows x64 installer
 
 The build machine needs the normal workspace toolchains. Target machines do **not** need Python, Node, setup.ps1, a developer checkout, or runtime downloads. The installer carries `resources/codex-automation`, outside ASAR. Quota plugin `0.4.3-host.1`, its license and explicit `models.usage` permission are unchanged.

@@ -59,6 +59,27 @@ No account files, tokens, browser profiles, editable Python installs, generated
 runtime binaries or dependency caches belong in Git. Build-time runtime validation
 must fail rather than silently emitting an incomplete "complete" installer.
 
+## Personal macOS arm64 distribution
+
+The complete custom package also supports native Apple Silicon Macs (including M2).
+`custom-macos.yml` builds DMG/ZIP artifacts on a native arm64 runner without Apple
+Developer secrets or notarization. It includes the same quota plugin and helper,
+a relocatable macOS Python 3.12, native Node and matching Playwright Chromium.
+Windows resource layout and provisioning are unchanged. Mac discovery uses
+`Contents/Resources/codex-automation`; executable code never comes from the
+credentials directory or a system runtime fallback. Runtime assembly resolves
+only internal approved links, preserves executable modes and verifies inventory
+hashes after packaging. Native offline probes run from relocated Unicode/spaces
+paths and mounted DMG payloads before upload. This lane uploads temporary Actions
+artifacts, not official release tags. See `custom/MACOS.md` for installation,
+app-scoped Gatekeeper approval and manual custom-build updates.
+
+On macOS, the OS-owned `/var` and `/tmp` spellings normalize to their canonical
+roots before lexical containment checks. A session created from the canonical
+root must classify writes through those aliases as workspace writes. Other
+user-controlled links still pass the existing resolved-path containment check;
+an alias containing an escaping link must never gain implicit workspace access.
+
 ## Acceptance
 
 - `provider-account-fallback.test.ts` checks compatibility, bounded traversal and

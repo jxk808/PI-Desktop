@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { CODEX_PORTABLE_COMPONENTS, resolveCodexAutomationRoots } from "./codex-batch-runtime";
+import { codexPortableRuntime, resolveCodexAutomationRoots } from "./codex-batch-runtime";
 import type {
   CodexBatchRunInput,
   CodexBatchSelection,
@@ -147,10 +147,11 @@ export class CodexBatchAutomation {
     let projectRoot = "";
     let pythonPath = "";
     let scriptPath = "";
+    const portable = codexPortableRuntime(this.deps.platform);
     for (const candidate of candidates) {
-      const candidatePython = join(candidate, ".python-runtime", "python.exe");
+      const candidatePython = join(candidate, portable.python);
       const candidateScript = join(candidate, "codex_oauth.py");
-      const required = CODEX_PORTABLE_COMPONENTS.map((component) => join(candidate, component));
+      const required = portable.components.map((component) => join(candidate, component));
       try {
         for (const path of required) await this.deps.pathExists(path);
       } catch {
@@ -261,6 +262,11 @@ export class CodexBatchAutomation {
         cwd: batch.projectRoot,
         env: {
           ...process.env,
+          PYTHONHOME: undefined,
+          PYTHONPATH: undefined,
+          VIRTUAL_ENV: undefined,
+          NODE_PATH: undefined,
+          NODE_OPTIONS: undefined,
           NO_PROXY: "127.0.0.1,localhost",
           PYTHONUTF8: "1",
           PYTHONNOUSERSITE: "1",

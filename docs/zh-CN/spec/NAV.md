@@ -52,6 +52,7 @@
 - [21-image-generation.md](/zh-CN/spec/03-runtime/21-image-generation)
 - [22-config-sync.md](/zh-CN/spec/03-runtime/22-config-sync)
 - [svg-attachment-input.md](/zh-CN/spec/03-runtime/svg-attachment-input)
+- [custom-source-migrations.md](/zh-CN/spec/03-runtime/custom-source-migrations)
 
 ## 4. 用户体验
 - [README.md](/zh-CN/spec/04-ux/README)
@@ -83,6 +84,7 @@
 - [06-release-runbook.md](/zh-CN/spec/06-delivery/06-release-runbook)
 - [plugin-reviews-test-plan.md](/zh-CN/spec/06-delivery/plugin-reviews-test-plan)
 - [07-remote-control-rollout.md](/zh-CN/spec/06-delivery/07-remote-control-rollout)
+- [custom-windows-artifacts.md](/zh-CN/spec/06-delivery/custom-windows-artifacts)
 
 ## 7. 插件
 - [README.md](/zh-CN/spec/07-plugins/README)

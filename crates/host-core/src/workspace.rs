@@ -193,13 +193,26 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// Normalize containment spelling without resolving symlinks. On Windows,
-/// expand drive-path 8.3 names in the deepest accessible prefix and retain any
-/// missing tail. Canonicalizing here would admit outside links back in.
+/// Normalize containment spelling without resolving user-controlled symlinks.
+/// Windows expands drive-path 8.3 names; macOS expands only the OS-owned
+/// /var and /tmp aliases. Missing tails and normal link-escape checks remain.
 fn normalize_containment_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     let path = strip_windows_extended_drive_prefix(path);
     let normalized = normalize_lexical(path.as_ref());
+    #[cfg(target_os = "macos")]
+    let normalized = {
+        let mut expanded = normalized.clone();
+        for alias in ["/var", "/tmp"] {
+            if let Ok(tail) = normalized.strip_prefix(alias) {
+                if let Ok(canonical) = std::fs::canonicalize(alias) {
+                    expanded = canonical.join(tail);
+                }
+                break;
+            }
+        }
+        expanded
+    };
     #[cfg(not(windows))]
     {
         normalized
@@ -520,6 +533,31 @@ mod tests {
         let p = resolve_in_workspace(root, "newdir/sub/file.txt").unwrap();
         assert!(p.starts_with(simple_canonicalize(root).unwrap()));
         assert!(p.ends_with("newdir/sub/file.txt"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_alias_preserves_workspace_identity_and_blocks_link_escape() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let root = simple_canonicalize(dir.path()).unwrap();
+        let alias = dir.path().join("new.txt");
+        let (resolved, kind) = resolve_tool_path_with_external(
+            &root,
+            &ContainedRoots::new(),
+            &alias.to_string_lossy(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(kind, ToolRoot::Workspace);
+        assert_eq!(resolved, root.join("new.txt"));
+        assert!(lexically_inside(&root, &alias.to_string_lossy()));
+        let outside = tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("escape")).unwrap();
+        assert_eq!(
+            resolve_in_workspace(&root, &dir.path().join("escape/new.txt").to_string_lossy())
+                .unwrap_err(),
+            "PATH_OUTSIDE_WORKSPACE"
+        );
     }
 
     #[cfg(unix)]

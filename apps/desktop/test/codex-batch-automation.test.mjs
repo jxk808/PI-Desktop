@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { register } from "node:module";
+import { join } from "node:path";
 
 register(new URL("./helpers/ts-import-hooks.mjs", import.meta.url));
 const {
@@ -42,7 +43,7 @@ function harness(outputs) {
   const calls = [];
   const children = [];
   const automation = new CodexBatchAutomation({
-    pickCredentialsFile: async () => "O:\\AutoCodexAuth\\号.txt",
+    pickCredentialsFile: async () => join("O:", "AutoCodexAuth", "号.txt"),
     helperRoots: ["D:\\Installed app 中文\\resources\\codex-automation"],
     pathExists: async () => {},
     newId: () => "batch-1",
@@ -80,7 +81,7 @@ test("selection uses trusted portable Python, never code beside credentials", as
   const selected = await h.automation.select();
   assert.deepEqual(selected, { batchId: "batch-1", total: 2, fileName: "号.txt" });
   assert.equal(JSON.stringify(selected).includes("AutoCodexAuth"), false);
-  assert.equal(h.calls[0].executable, "D:\\Installed app 中文\\resources\\codex-automation\\.python-runtime\\python.exe");
+  assert.equal(h.calls[0].executable, join("D:\\Installed app 中文\\resources\\codex-automation", ".python-runtime/python.exe"));
   assert.deepEqual(h.calls[0].args.slice(-2), ["--validate-only", "--json-events"]);
 });
 
@@ -141,7 +142,7 @@ test("credentials file may live outside the trusted helper root", async () => {
   const calls = [];
   const helperRoot = "D:\\Installed app 中文\\resources\\codex-automation";
   const automation = new CodexBatchAutomation({
-    pickCredentialsFile: async () => "C:\\Users\\Administrator\\Downloads\\accounts.txt",
+    pickCredentialsFile: async () => join("C:", "Users", "Administrator", "Downloads", "accounts.txt"),
     helperRoots: [helperRoot],
     platform: "win32",
     pathExists: async (path) => {
@@ -160,8 +161,8 @@ test("credentials file may live outside the trusted helper root", async () => {
   });
   const selected = await automation.select();
   assert.deepEqual(selected, { batchId: "batch-external", total: 3, fileName: "accounts.txt" });
-  assert.equal(calls[0].executable, `${helperRoot}\\.python-runtime\\python.exe`);
-  assert.ok(calls[0].args.includes("C:\\Users\\Administrator\\Downloads\\accounts.txt"));
+  assert.equal(calls[0].executable, join(helperRoot, ".python-runtime/python.exe"));
+  assert.ok(calls[0].args.includes(join("C:", "Users", "Administrator", "Downloads", "accounts.txt")));
 });
 
 test("missing portable components fail without fixed-drive advice or credential-directory probing", async () => {

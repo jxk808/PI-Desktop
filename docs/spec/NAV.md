@@ -49,6 +49,7 @@
 - [21-image-generation.md](03-runtime/21-image-generation.md)
 - [22-config-sync.md](03-runtime/22-config-sync.md)
 - [svg-attachment-input.md](03-runtime/svg-attachment-input.md)
+- [custom-source-migrations.md](03-runtime/custom-source-migrations.md)
 
 ## 4. UX
 - [README.md](04-ux/README.md)
@@ -80,6 +81,7 @@
 - [06-release-runbook.md](06-delivery/06-release-runbook.md)
 - [plugin-reviews-test-plan.md](06-delivery/plugin-reviews-test-plan.md)
 - [07-remote-control-rollout.md](06-delivery/07-remote-control-rollout.md)
+- [custom-windows-artifacts.md](06-delivery/custom-windows-artifacts.md)
 
 ## 7. Plugins
 - [README.md](07-plugins/README.md)

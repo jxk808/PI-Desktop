@@ -1,5 +1,24 @@
 # 04. E2E Test Plan
 
+## E2E-CUSTOM-MACOS-arm64-complete-package
+
+- Preconditions: native macOS arm64 runner, pinned prepared runtime and synthetic
+  accounts only; no provider requests or installed user data.
+- Steps: build the current custom source; mount its DMG and unpack its ZIP; check
+  quota permissions/licenses, Rust host and sidecar/ASAR against source outputs,
+  runtime hashes, executable modes and arm64 Mach-O slices. Relocate automation
+  into a Unicode/spaces directory, select synthetic credentials using production
+  batch automation, run bundled Chromium against offline HTML and load the Node
+  bridge without relying on a developer Python/Node or system browser.
+- Expected: complete DMG/ZIP only; missing/tampered/runtime-escape inputs fail
+  before artifact upload. Target machines require no runtime installation.
+  Existing explicit plugin authorization and OAuth validation remain unchanged.
+- Coverage: `custom/macos-package.test.mjs`, `custom/macos-automation-runtime.test.mjs`,
+  `custom/verify-macos-package.mjs`, and `custom-macos.yml` native gates.
+- Spec: `03-runtime/custom-source-migrations.md`; milestone: custom maintenance.
+- Acceptance/status: automated native CI gate; real-account OAuth is not exercised
+  and local Windows tests alone cannot qualify a Mac release.
+
 ## E2E-WINDOWS-path-identity-and-remote-approval
 
 - Preconditions: native Windows CI with synthetic temporary data only.
