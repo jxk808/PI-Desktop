@@ -74,6 +74,12 @@ paths and mounted DMG payloads before upload. This lane uploads temporary Action
 artifacts, not official release tags. See `custom/MACOS.md` for installation,
 app-scoped Gatekeeper approval and manual custom-build updates.
 
+On macOS, the OS-owned `/var` and `/tmp` spellings normalize to their canonical
+roots before lexical containment checks. A session created from the canonical
+root must classify writes through those aliases as workspace writes. Other
+user-controlled links still pass the existing resolved-path containment check;
+an alias containing an escaping link must never gain implicit workspace access.
+
 ## Acceptance
 
 - `provider-account-fallback.test.ts` checks compatibility, bounded traversal and
